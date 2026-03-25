@@ -8,6 +8,8 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
+from database import supabase, db, sb_find_one, sb_find_many, sb_insert, sb_update, sb_delete, sb_delete_many, sb_count, sb_upsert
+
 logger = logging.getLogger(__name__)
 
 # Global scheduler instance
@@ -24,65 +26,63 @@ def get_scheduler():
 
 async def sync_holdprint_job():
     """Sync Holdprint data automatically"""
-    from database import db
-    
     logger.info("🔄 Iniciando sincronização automática com Holdprint...")
-    
+
     try:
         import os
         import httpx
         import uuid
         from services.holdprint import extract_product_dimensions
-        
+
         HOLDPRINT_API_KEY_POA = os.environ.get('HOLDPRINT_API_KEY_POA')
         HOLDPRINT_API_KEY_SP = os.environ.get('HOLDPRINT_API_KEY_SP')
         API_URL = "https://api.holdworks.ai/api-key/jobs/data"
-        
+
         total_imported = 0
         total_skipped = 0
         total_errors = 0
-        
+
         async with httpx.AsyncClient(timeout=60.0) as client:
             for branch in ["POA", "SP"]:
                 api_key = HOLDPRINT_API_KEY_POA if branch == "POA" else HOLDPRINT_API_KEY_SP
-                
+
                 if not api_key:
                     logger.warning(f"API key not configured for {branch}")
                     continue
-                
+
                 headers = {"x-api-key": api_key, "Accept": "application/json"}
                 page = 1
-                
+
                 try:
                     while True:
                         response = await client.get(f"{API_URL}?page={page}", headers=headers)
                         response.raise_for_status()
                         data = response.json()
-                        
+
                         jobs = data.get('data', []) if isinstance(data, dict) else data
                         has_next = data.get('hasNextPage', False) if isinstance(data, dict) else False
-                        
+
                         if not jobs:
                             break
-                        
+
                         for holdprint_job in jobs:
                             holdprint_job_id = str(holdprint_job.get('id', ''))
-                            
-                            existing = await db.jobs.find_one({"holdprint_job_id": holdprint_job_id})
+
+                            existing = await sb_find_one('jobs', {'holdprint_job_id': holdprint_job_id})
                             if existing:
                                 total_skipped += 1
                                 continue
-                            
+
                             try:
                                 products = holdprint_job.get('production', {}).get('products', [])
                                 products_with_area = []
                                 total_area_m2 = 0.0
-                                
+
                                 for product in products:
                                     product_info = extract_product_dimensions(product)
                                     products_with_area.append(product_info)
                                     total_area_m2 += product_info.get('total_area_m2', 0)
-                                
+
                                 job_doc = {
                                     "id": str(uuid.uuid4()),
                                     "holdprint_job_id": holdprint_job_id,
@@ -101,50 +101,46 @@ async def sync_holdprint_job():
                                     "total_quantity": sum(p.get('quantity', 1) for p in products),
                                     "created_at": datetime.now(timezone.utc).isoformat()
                                 }
-                                
-                                await db.jobs.insert_one(job_doc)
+
+                                await sb_insert('jobs', job_doc)
                                 total_imported += 1
-                                
+
                             except Exception as e:
                                 total_errors += 1
                                 logger.error(f"Error importing job {holdprint_job_id}: {e}")
-                        
+
                         if not has_next:
                             break
                         page += 1
                         if page > 50:
                             break
-                    
+
                     logger.info(f"Sync {branch}: {total_imported} imported")
-                    
+
                 except Exception as e:
                     logger.error(f"Error syncing {branch}: {e}")
-        
-        await db.system_config.update_one(
-            {"key": "last_holdprint_sync"},
-            {"$set": {
-                "key": "last_holdprint_sync",
-                "value": datetime.now(timezone.utc).isoformat(),
-                "total_imported": total_imported,
-                "total_skipped": total_skipped,
-                "total_errors": total_errors
-            }},
-            upsert=True
-        )
-        
+
+        await sb_upsert('system_config', {
+            "key": "last_holdprint_sync",
+            "value": datetime.now(timezone.utc).isoformat(),
+            "total_imported": total_imported,
+            "total_skipped": total_skipped,
+            "total_errors": total_errors
+        }, on_conflict='key')
+
         logger.info(f"✅ Sync concluída: {total_imported} importados, {total_skipped} existentes")
-        
+
     except Exception as e:
         logger.error(f"❌ Erro na sincronização: {e}")
 
 
-def setup_scheduler(db_instance):
+def setup_scheduler(db_instance=None):
     """
     Setup scheduled jobs.
     Call this during application startup.
     """
     global scheduler
-    
+
     # Add Holdprint sync job - runs daily at 6:00 AM (Brazil time, UTC-3)
     scheduler.add_job(
         sync_holdprint_job,
@@ -153,13 +149,13 @@ def setup_scheduler(db_instance):
         name='Sincronização diária Holdprint',
         replace_existing=True
     )
-    
+
     scheduled_jobs['holdprint_daily_sync'] = {
         'name': 'Sincronização diária Holdprint',
         'schedule': 'Diariamente às 06:00 (horário de Brasília)',
         'description': 'Busca novas OS da Holdprint e importa para o sistema'
     }
-    
+
     logger.info("📅 Scheduler configurado: Sincronização Holdprint às 06:00 (BRT)")
 
 
@@ -180,7 +176,7 @@ def shutdown_scheduler():
 def get_scheduled_jobs():
     """Get list of scheduled jobs and their next run times"""
     jobs_info = []
-    
+
     for job in scheduler.get_jobs():
         job_config = scheduled_jobs.get(job.id, {})
         jobs_info.append({
@@ -191,7 +187,7 @@ def get_scheduled_jobs():
             "next_run": job.next_run_time.isoformat() if job.next_run_time else None,
             "is_paused": job.next_run_time is None
         })
-    
+
     return jobs_info
 
 

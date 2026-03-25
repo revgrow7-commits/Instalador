@@ -5,8 +5,7 @@ starlette==0.37.2
 python-multipart==0.0.20
 
 # Database
-motor==3.3.1
-pymongo==4.5.0
+supabase==2.9.0
 
 # Authentication
 passlib==1.7.4
@@ -50,6 +49,12 @@ tzlocal==5.3.1
 # Date handling
 python-dateutil==2.9.0.post0
 pytz==2025.2
+
+# Image processing
+Pillow==10.4.0
+
+# Cryptography (needed by pywebpush/py-vapid)
+cryptography>=46.0.0
 
 # Utilities
 certifi==2025.11.12

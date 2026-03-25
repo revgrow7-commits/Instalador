@@ -49,7 +49,7 @@ from config import (
     MAX_CHECKOUT_DISTANCE_METERS, UPLOAD_DIR,
     PAUSE_REASONS, PAUSE_REASON_LABELS, PRODUCT_FAMILY_MAPPING
 )
-from database import db, client
+from database import supabase, db, sb_find_one, sb_find_many, sb_insert, sb_update, sb_delete, sb_delete_many, sb_count, sb_upsert
 
 # Import services
 from services.product_classifier import classify_product_to_family, extract_product_measures, calculate_job_products_area
@@ -57,10 +57,6 @@ from services.holdprint import extract_product_dimensions
 from services.image import compress_image_to_base64, compress_base64_image
 from services.gps import calculate_gps_distance
 from services.gamification import calculate_checkout_coins, add_coins, calculate_level, COIN_REWARDS
-from services.scheduler import (
-    get_scheduler, setup_scheduler, start_scheduler, shutdown_scheduler,
-    get_scheduled_jobs, pause_job, resume_job, run_job_now
-)
 
 # Security setup (kept here for backward compatibility, also in security.py)
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -598,7 +594,7 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
     except JWTError:
         raise credentials_exception
     
-    user_doc = await db.users.find_one({"id": user_id}, {"_id": 0})
+    user_doc = await sb_find_one('users', {'id': user_id})
     if user_doc is None:
         raise credentials_exception
     return User(**user_doc)
@@ -761,23 +757,23 @@ async def register(user_data: UserCreate, current_user: User = Depends(get_curre
     await require_role(current_user, [UserRole.ADMIN])
     
     # Check if user exists
-    existing = await db.users.find_one({"email": user_data.email})
+    existing = await sb_find_one('users', {'email': user_data.email})
     if existing:
         raise HTTPException(status_code=400, detail="Email already registered")
-    
+
     # Create user
     user = User(
         email=user_data.email,
         name=user_data.name,
         role=user_data.role
     )
-    
+
     user_dict = user.model_dump()
     user_dict['password_hash'] = get_password_hash(user_data.password)
     user_dict['created_at'] = user_dict['created_at'].isoformat()
-    
-    await db.users.insert_one(user_dict)
-    
+
+    await sb_insert('users', user_dict)
+
     # If installer, create installer record
     if user_data.role == UserRole.INSTALLER:
         installer = Installer(
@@ -787,7 +783,7 @@ async def register(user_data: UserCreate, current_user: User = Depends(get_curre
         )
         installer_dict = installer.model_dump()
         installer_dict['created_at'] = installer_dict['created_at'].isoformat()
-        await db.installers.insert_one(installer_dict)
+        await sb_insert('installers', installer_dict)
     
     return user
 
@@ -801,25 +797,25 @@ class SelfRegisterRequest(BaseModel):
 async def self_register(request: SelfRegisterRequest):
     """Allow users to create their own account"""
     # Check if email already exists
-    existing_user = await db.users.find_one({"email": request.email}, {"_id": 0})
+    existing_user = await sb_find_one('users', {'email': request.email})
     if existing_user:
         raise HTTPException(status_code=400, detail="Este email já está cadastrado")
-    
+
     if len(request.password) < 6:
         raise HTTPException(status_code=400, detail="A senha deve ter pelo menos 6 caracteres")
-    
+
     # Create user with default 'installer' role
     user = User(
         name=request.name,
         email=request.email,
         role=UserRole.INSTALLER  # Default role for self-registered users
     )
-    
+
     user_dict = user.model_dump()
     user_dict['password_hash'] = get_password_hash(request.password)
     user_dict['created_at'] = user_dict['created_at'].isoformat()
-    await db.users.insert_one(user_dict)
-    
+    await sb_insert('users', user_dict)
+
     # Auto-create installer profile
     installer = Installer(
         user_id=user.id,
@@ -828,7 +824,7 @@ async def self_register(request: SelfRegisterRequest):
     )
     installer_dict = installer.model_dump()
     installer_dict['created_at'] = installer_dict['created_at'].isoformat()
-    await db.installers.insert_one(installer_dict)
+    await sb_insert('installers', installer_dict)
     
     logging.info(f"New user self-registered: {request.email}")
     
@@ -841,7 +837,7 @@ async def self_register(request: SelfRegisterRequest):
 @api_router.post("/auth/login", response_model=Token)
 async def login(credentials: UserLogin):
     # Find user
-    user_doc = await db.users.find_one({"email": credentials.email}, {"_id": 0})
+    user_doc = await sb_find_one('users', {'email': credentials.email})
     if not user_doc:
         raise HTTPException(status_code=401, detail="Invalid credentials")
     
@@ -880,19 +876,19 @@ class AdminResetPasswordRequest(BaseModel):
 async def forgot_password(request: ForgotPasswordRequest):
     """Send password reset email"""
     # Find user by email
-    user = await db.users.find_one({"email": request.email}, {"_id": 0})
-    
+    user = await sb_find_one('users', {'email': request.email})
+
     if not user:
         # Don't reveal if email exists or not for security
         return {"message": "Se o email existir, você receberá um link para redefinir sua senha."}
-    
+
     # Generate reset token
     reset_token = secrets.token_urlsafe(32)
     expires_at = datetime.now(timezone.utc) + timedelta(hours=1)
-    
+
     # Store reset token in database
-    await db.password_resets.delete_many({"user_id": user['id']})  # Remove old tokens
-    await db.password_resets.insert_one({
+    await sb_delete_many('password_resets', {'user_id': user['id']})  # Remove old tokens
+    await sb_insert('password_resets', {
         "id": str(uuid.uuid4()),
         "user_id": user['id'],
         "token": reset_token,
@@ -963,43 +959,40 @@ async def forgot_password(request: ForgotPasswordRequest):
 async def reset_password(request: ResetPasswordRequest):
     """Reset password using token from email"""
     # Find reset token
-    reset_record = await db.password_resets.find_one({"token": request.token}, {"_id": 0})
-    
+    reset_record = await sb_find_one('password_resets', {'token': request.token})
+
     if not reset_record:
         raise HTTPException(status_code=400, detail="Token inválido ou expirado")
-    
+
     # Check if token expired
     expires_at = datetime.fromisoformat(reset_record['expires_at'])
     if datetime.now(timezone.utc) > expires_at:
-        await db.password_resets.delete_one({"token": request.token})
+        await sb_delete_many('password_resets', {'token': request.token})
         raise HTTPException(status_code=400, detail="Token expirado. Solicite um novo link.")
-    
+
     # Update user password
     new_hash = get_password_hash(request.new_password)
-    result = await db.users.update_one(
-        {"id": reset_record['user_id']},
-        {"$set": {"password_hash": new_hash}}
-    )
-    
-    if result.modified_count == 0:
+    updated = await sb_update('users', reset_record['user_id'], {'password_hash': new_hash})
+
+    if not updated:
         raise HTTPException(status_code=404, detail="Usuário não encontrado")
-    
+
     # Delete used token
-    await db.password_resets.delete_one({"token": request.token})
+    await sb_delete_many('password_resets', {'token': request.token})
     
     return {"message": "Senha alterada com sucesso!"}
 
 @api_router.get("/auth/verify-reset-token")
 async def verify_reset_token(token: str):
     """Verify if a reset token is valid"""
-    reset_record = await db.password_resets.find_one({"token": token}, {"_id": 0})
-    
+    reset_record = await sb_find_one('password_resets', {'token': token})
+
     if not reset_record:
         return {"valid": False, "message": "Token inválido"}
-    
+
     expires_at = datetime.fromisoformat(reset_record['expires_at'])
     if datetime.now(timezone.utc) > expires_at:
-        await db.password_resets.delete_one({"token": token})
+        await sb_delete_many('password_resets', {'token': token})
         return {"valid": False, "message": "Token expirado"}
     
     return {"valid": True}
@@ -1014,16 +1007,13 @@ async def admin_reset_password(
     await require_role(current_user, [UserRole.ADMIN])
     
     # Find user
-    user = await db.users.find_one({"id": user_id}, {"_id": 0})
+    user = await sb_find_one('users', {'id': user_id})
     if not user:
         raise HTTPException(status_code=404, detail="Usuário não encontrado")
-    
+
     # Update password
     new_hash = get_password_hash(request.new_password)
-    await db.users.update_one(
-        {"id": user_id},
-        {"$set": {"password_hash": new_hash}}
-    )
+    await sb_update('users', user_id, {'password_hash': new_hash})
     
     return {"message": f"Senha do usuário {user.get('name')} redefinida com sucesso"}
 
@@ -1039,37 +1029,32 @@ async def cleanup_test_data(current_user: User = Depends(get_current_user)):
     await require_role(current_user, [UserRole.ADMIN])
     
     results = {}
-    
+
     # 1. Deletar todos os jobs
-    jobs_result = await db.jobs.delete_many({})
-    results["jobs_deleted"] = jobs_result.deleted_count
-    
+    await asyncio.to_thread(lambda: supabase.table('jobs').delete().neq('id', '').execute())
+    results["jobs_deleted"] = True
+
     # 2. Deletar todos os checkins
-    checkins_result = await db.checkins.delete_many({})
-    results["checkins_deleted"] = checkins_result.deleted_count
-    
+    await asyncio.to_thread(lambda: supabase.table('checkins').delete().neq('id', '').execute())
+    results["checkins_deleted"] = True
+
     # 3. Deletar todos os item_checkins
-    item_checkins_result = await db.item_checkins.delete_many({})
-    results["item_checkins_deleted"] = item_checkins_result.deleted_count
-    
+    await asyncio.to_thread(lambda: supabase.table('item_checkins').delete().neq('id', '').execute())
+    results["item_checkins_deleted"] = True
+
     # 4. Deletar todas as atribuições de instaladores
-    assignments_result = await db.job_assignments.delete_many({})
-    results["assignments_deleted"] = assignments_result.deleted_count
-    
-    # 5. Deletar status de sincronização
-    sync_result = await db.scheduler_sync_status.delete_many({})
-    results["sync_status_deleted"] = sync_result.deleted_count
-    
-    # 6. Resetar moedas e pontos dos instaladores (opcional - mantém usuários)
-    installers_result = await db.installers.update_many(
-        {},
-        {"$set": {"coins": 0, "total_jobs": 0, "total_area_installed": 0}}
-    )
-    results["installers_reset"] = installers_result.modified_count
-    
-    # 7. Deletar transações de moedas
-    transactions_result = await db.coin_transactions.delete_many({})
-    results["coin_transactions_deleted"] = transactions_result.deleted_count
+    await asyncio.to_thread(lambda: supabase.table('job_assignments').delete().neq('id', '').execute())
+    results["assignments_deleted"] = True
+
+    # 5. Resetar moedas e pontos dos instaladores (mantém usuários)
+    installers = await sb_find_many('installers')
+    for inst in installers:
+        await sb_update('installers', inst['id'], {'coins': 0, 'total_jobs': 0, 'total_area_installed': 0})
+    results["installers_reset"] = len(installers)
+
+    # 6. Deletar transações de moedas
+    await asyncio.to_thread(lambda: supabase.table('coin_transactions').delete().neq('id', '').execute())
+    results["coin_transactions_deleted"] = True
     
     logger.info(f"Admin {current_user.email} limpou dados de teste: {results}")
     
@@ -1088,13 +1073,11 @@ async def reprocess_job_products(current_user: User = Depends(get_current_user))
     await require_role(current_user, [UserRole.ADMIN])
     
     # Buscar jobs sem products_with_area ou com array vazio
-    jobs_to_process = await db.jobs.find({
-        "$or": [
-            {"products_with_area": {"$exists": False}},
-            {"products_with_area": []},
-            {"products_with_area": None}
-        ]
-    }).to_list(1000)
+    all_jobs = await sb_find_many('jobs')
+    jobs_to_process = [
+        j for j in all_jobs
+        if not j.get('products_with_area')
+    ]
     
     processed = 0
     errors = []
@@ -1134,15 +1117,12 @@ async def reprocess_job_products(current_user: User = Depends(get_current_user))
                         total_area_m2 += total_area
                     
                     # Atualizar no banco
-                    await db.jobs.update_one(
-                        {"id": job['id']},
-                        {"$set": {
-                            "products_with_area": products_with_area,
-                            "area_m2": total_area_m2,
-                            "total_products": len(products_with_area),
-                            "total_quantity": sum(p.get('quantity', 1) for p in products_with_area)
-                        }}
-                    )
+                    await sb_update('jobs', job['id'], {
+                        'products_with_area': products_with_area,
+                        'area_m2': total_area_m2,
+                        'total_products': len(products_with_area),
+                        'total_quantity': sum(p.get('quantity', 1) for p in products_with_area)
+                    })
                     processed += 1
                 continue
             
@@ -1175,15 +1155,12 @@ async def reprocess_job_products(current_user: User = Depends(get_current_user))
                 total_quantity += quantity
             
             # Atualizar no banco
-            await db.jobs.update_one(
-                {"id": job['id']},
-                {"$set": {
-                    "products_with_area": products_with_area,
-                    "area_m2": total_area_m2,
-                    "total_products": len(products_with_area),
-                    "total_quantity": total_quantity
-                }}
-            )
+            await sb_update('jobs', job['id'], {
+                'products_with_area': products_with_area,
+                'area_m2': total_area_m2,
+                'total_products': len(products_with_area),
+                'total_quantity': total_quantity
+            })
             processed += 1
             
         except Exception as e:
@@ -1204,7 +1181,7 @@ async def reprocess_job_products(current_user: User = Depends(get_current_user))
 @api_router.get("/users", response_model=List[User])
 async def list_users(current_user: User = Depends(get_current_user)):
     await require_role(current_user, [UserRole.ADMIN])
-    users = await db.users.find({}, {"_id": 0, "password_hash": 0}).to_list(1000)
+    users = await sb_find_many('users')
     
     for user in users:
         if isinstance(user['created_at'], str):
@@ -1222,16 +1199,11 @@ async def update_user(user_id: str, user_data: dict, current_user: User = Depend
     if user_data.get('password'):
         update_data['password_hash'] = get_password_hash(user_data['password'])
     
-    result = await db.users.find_one_and_update(
-        {"id": user_id},
-        {"$set": update_data},
-        return_document=True,
-        projection={"_id": 0, "password_hash": 0}
-    )
-    
+    result = await sb_update('users', user_id, update_data)
+
     if not result:
         raise HTTPException(status_code=404, detail="User not found")
-    
+
     # Update installer data if applicable
     if user_data.get('role') == 'installer':
         installer_update = {}
@@ -1241,24 +1213,24 @@ async def update_user(user_id: str, user_data: dict, current_user: User = Depend
             installer_update['branch'] = user_data['branch']
         if 'name' in user_data:
             installer_update['full_name'] = user_data['name']
-        
+
         if installer_update:
-            await db.installers.update_one(
-                {"user_id": user_id},
-                {"$set": installer_update}
-            )
-    
+            installer = await sb_find_one('installers', {'user_id': user_id})
+            if installer:
+                await sb_update('installers', installer['id'], installer_update)
+
     if isinstance(result['created_at'], str):
         result['created_at'] = datetime.fromisoformat(result['created_at'])
-    
+
     return User(**result)
 
 @api_router.delete("/users/{user_id}")
 async def delete_user(user_id: str, current_user: User = Depends(get_current_user)):
     await require_role(current_user, [UserRole.ADMIN])
-    result = await db.users.delete_one({"id": user_id})
-    if result.deleted_count == 0:
+    existing = await sb_find_one('users', {'id': user_id})
+    if not existing:
         raise HTTPException(status_code=404, detail="User not found")
+    await sb_delete('users', user_id)
     return {"message": "User deleted"}
 
 
@@ -1274,24 +1246,21 @@ async def change_password(
 ):
     """Change the current user's password"""
     # Get user with password hash
-    user_doc = await db.users.find_one({"id": current_user.id})
+    user_doc = await sb_find_one('users', {'id': current_user.id})
     if not user_doc:
         raise HTTPException(status_code=404, detail="User not found")
-    
+
     # Verify current password
     if not verify_password(password_data.current_password, user_doc['password_hash']):
         raise HTTPException(status_code=400, detail="Senha atual incorreta")
-    
+
     # Validate new password
     if len(password_data.new_password) < 6:
         raise HTTPException(status_code=400, detail="A nova senha deve ter pelo menos 6 caracteres")
-    
+
     # Hash and save new password
     new_password_hash = get_password_hash(password_data.new_password)
-    await db.users.update_one(
-        {"id": current_user.id},
-        {"$set": {"password_hash": new_password_hash}}
-    )
+    await sb_update('users', current_user.id, {'password_hash': new_password_hash})
     
     return {"message": "Senha alterada com sucesso"}
 
@@ -1311,7 +1280,7 @@ async def detect_product_family(product_names: list) -> tuple:
     Returns (family_id, family_name) tuple.
     """
     # Get all families
-    families = await db.product_families.find({}, {"_id": 0}).to_list(100)
+    families = await sb_find_many('product_families')
     
     # Keywords for each family type
     family_keywords = {
@@ -1361,21 +1330,21 @@ async def delete_job(
     await require_role(current_user, [UserRole.ADMIN, UserRole.MANAGER])
     
     # Check if job exists
-    job = await db.jobs.find_one({"id": job_id})
+    job = await sb_find_one('jobs', {'id': job_id})
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    
+
     # Delete all related checkins
-    await db.checkins.delete_many({"job_id": job_id})
-    
+    await sb_delete_many('checkins', {'job_id': job_id})
+
     # Delete all related item checkins
-    await db.item_checkins.delete_many({"job_id": job_id})
-    
+    await sb_delete_many('item_checkins', {'job_id': job_id})
+
     # Delete all related installed products
-    await db.installed_products.delete_many({"job_id": job_id})
-    
+    await sb_delete_many('installed_products', {'job_id': job_id})
+
     # Delete the job
-    await db.jobs.delete_one({"id": job_id})
+    await sb_delete('jobs', job_id)
     
     return {"message": "Job and all related data deleted successfully"}
 
@@ -1390,7 +1359,7 @@ async def list_installers(current_user: User = Depends(get_current_user)):
     # Allow installers to see basic info about other installers (for team calendar)
     # Admin/Manager see full data
     
-    installers = await db.installers.find({}, {"_id": 0}).to_list(1000)
+    installers = await sb_find_many('installers')
     
     for installer in installers:
         if isinstance(installer['created_at'], str):
@@ -1404,19 +1373,14 @@ async def update_installer(installer_id: str, installer_data: dict, current_user
     
     update_data = {k: v for k, v in installer_data.items() if k not in ['id', 'user_id', 'created_at']}
     
-    result = await db.installers.find_one_and_update(
-        {"id": installer_id},
-        {"$set": update_data},
-        return_document=True,
-        projection={"_id": 0}
-    )
-    
+    result = await sb_update('installers', installer_id, update_data)
+
     if not result:
         raise HTTPException(status_code=404, detail="Installer not found")
-    
+
     if isinstance(result['created_at'], str):
         result['created_at'] = datetime.fromisoformat(result['created_at'])
-    
+
     return Installer(**result)
 
 # ============ METRICS ROUTES ============
@@ -1598,29 +1562,26 @@ async def award_coins(user_id: str, amount: int, transaction_type: str, descript
         return None
     
     # Get or create balance
-    balance = await db.gamification_balances.find_one({"user_id": user_id}, {"_id": 0})
-    
+    balance = await sb_find_one('gamification_balances', {'user_id': user_id})
+
     if not balance:
         balance = GamificationBalance(user_id=user_id).model_dump()
         balance["created_at"] = balance["created_at"].isoformat()
         balance["updated_at"] = balance["updated_at"].isoformat()
-        await db.gamification_balances.insert_one(balance)
-    
+        await sb_insert('gamification_balances', balance)
+
     # Update balance
     new_total = (balance.get("total_coins", 0) or 0) + amount
     new_lifetime = (balance.get("lifetime_coins", 0) or 0) + amount
     new_level = get_level_from_coins(new_lifetime)["level"]
-    
-    await db.gamification_balances.update_one(
-        {"user_id": user_id},
-        {"$set": {
-            "total_coins": new_total,
-            "lifetime_coins": new_lifetime,
-            "current_level": new_level,
-            "updated_at": datetime.now(timezone.utc).isoformat()
-        }}
-    )
-    
+
+    await sb_update('gamification_balances', balance['id'], {
+        'total_coins': new_total,
+        'lifetime_coins': new_lifetime,
+        'current_level': new_level,
+        'updated_at': datetime.now(timezone.utc).isoformat()
+    })
+
     # Create transaction record
     transaction = CoinTransaction(
         user_id=user_id,
@@ -1632,7 +1593,7 @@ async def award_coins(user_id: str, amount: int, transaction_type: str, descript
     )
     trans_dict = transaction.model_dump()
     trans_dict["created_at"] = trans_dict["created_at"].isoformat()
-    await db.coin_transactions.insert_one(trans_dict)
+    await sb_insert('coin_transactions', trans_dict)
     
     return {
         "coins_awarded": amount,
@@ -1681,47 +1642,30 @@ api_router.include_router(jobs_router, tags=["Jobs"])
 async def get_scheduler_jobs(current_user: User = Depends(get_current_user)):
     """List all scheduled jobs and their status"""
     await require_role(current_user, [UserRole.ADMIN, UserRole.MANAGER])
-    
-    jobs = get_scheduled_jobs()
-    scheduler_instance = get_scheduler()
-    
+
     return {
-        "scheduler_running": scheduler_instance.running,
-        "jobs": jobs
+        "scheduler_running": False,
+        "jobs": [],
+        "message": "Scheduler replaced by Vercel Cron. Use /api/cron/sync-holdprint endpoint."
     }
 
 @api_router.post("/scheduler/jobs/{job_id}/pause")
 async def pause_scheduler_job(job_id: str, current_user: User = Depends(get_current_user)):
-    """Pause a scheduled job"""
+    """Pause a scheduled job (no-op: scheduler replaced by Vercel Cron)"""
     await require_role(current_user, [UserRole.ADMIN])
-    
-    try:
-        pause_job(job_id)
-        return {"success": True, "message": f"Job {job_id} pausado"}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    return {"success": True, "message": "Scheduler replaced by Vercel Cron. No action taken."}
 
 @api_router.post("/scheduler/jobs/{job_id}/resume")
 async def resume_scheduler_job(job_id: str, current_user: User = Depends(get_current_user)):
-    """Resume a paused job"""
+    """Resume a paused job (no-op: scheduler replaced by Vercel Cron)"""
     await require_role(current_user, [UserRole.ADMIN])
-    
-    try:
-        resume_job(job_id)
-        return {"success": True, "message": f"Job {job_id} retomado"}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    return {"success": True, "message": "Scheduler replaced by Vercel Cron. No action taken."}
 
 @api_router.post("/scheduler/jobs/{job_id}/run-now")
 async def run_scheduler_job_now(job_id: str, current_user: User = Depends(get_current_user)):
-    """Trigger a job to run immediately"""
+    """Trigger a job to run immediately (no-op: scheduler replaced by Vercel Cron)"""
     await require_role(current_user, [UserRole.ADMIN, UserRole.MANAGER])
-    
-    success = run_job_now(job_id)
-    if success:
-        return {"success": True, "message": f"Job {job_id} será executado em instantes"}
-    else:
-        raise HTTPException(status_code=404, detail=f"Job {job_id} não encontrado")
+    return {"success": True, "message": "Scheduler replaced by Vercel Cron. Use /api/cron/sync-holdprint to trigger sync."}
 
 
 # ============ TRELLO PCP INTEGRATION ============
@@ -1844,13 +1788,37 @@ logger = logging.getLogger(__name__)
 
 @app.on_event("startup")
 async def startup_event():
-    """Initialize scheduler on application startup"""
-    setup_scheduler(db)
-    start_scheduler()
-    logger.info("✅ Aplicação iniciada com scheduler ativo")
+    """Initialize application on startup"""
+    logger.info("✅ Aplicação iniciada com Supabase")
 
 @app.on_event("shutdown")
-async def shutdown_db_client():
-    shutdown_scheduler()
-    client.close()
+async def shutdown_event():
     logger.info("🛑 Aplicação encerrada")
+
+
+# ============ VERCEL CRON ENDPOINT ============
+from fastapi import Request as FastAPIRequest
+from config import CRON_SECRET
+
+@api_router.post("/cron/sync-holdprint")
+async def cron_sync_holdprint(request: FastAPIRequest):
+    """Endpoint chamado pelo Vercel Cron para sincronizar jobs da Holdprint a cada 30 min."""
+    secret = request.headers.get("x-cron-secret", "")
+    if CRON_SECRET and secret != CRON_SECRET:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    from routes.jobs import fetch_holdprint_jobs, _import_job_list
+    total_imported = 0
+    total_skipped = 0
+
+    for branch in ["SP", "POA"]:
+        try:
+            holdprint_jobs = await fetch_holdprint_jobs(branch)
+            imported, skipped, _ = await _import_job_list(holdprint_jobs, branch)
+            total_imported += imported
+            total_skipped += skipped
+        except Exception as e:
+            logger.error(f"Cron sync error for {branch}: {e}")
+
+    logger.info(f"Cron sync: {total_imported} imported, {total_skipped} skipped")
+    return {"success": True, "imported": total_imported, "skipped": total_skipped}
