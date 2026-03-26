@@ -1276,9 +1276,7 @@ async def change_password(
 # NOTE: Legacy check-in routes have been migrated to routes/checkins.py
 # The router is included via: api_router.include_router(checkins_router, tags=["Check-ins"])
 
-# Create uploads directory if it doesn't exist
-UPLOAD_DIR = Path("/app/uploads")
-UPLOAD_DIR.mkdir(exist_ok=True)
+# UPLOAD_DIR is defined in config.py (imported above)
 
 
 async def detect_product_family(product_names: list) -> tuple:
