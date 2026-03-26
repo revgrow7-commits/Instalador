@@ -4,12 +4,19 @@ Refactored with modular architecture.
 
 Modules:
 - config.py: Configuration and constants
-- database.py: MongoDB connection
+- database.py: Supabase connection
 - security.py: Authentication utilities
 - models/: Pydantic models
 - services/: Business logic services
-- routes/: API route handlers (being migrated)
+- routes/: API route handlers
 """
+import sys
+import os as _os
+# Add backend directory to path so relative imports work in Vercel serverless
+_backend_dir = _os.path.dirname(_os.path.abspath(__file__))
+if _backend_dir not in sys.path:
+    sys.path.insert(0, _backend_dir)
+
 from fastapi import FastAPI, APIRouter, HTTPException, Depends, status, UploadFile, File, Form, Query
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.responses import FileResponse, StreamingResponse, RedirectResponse
