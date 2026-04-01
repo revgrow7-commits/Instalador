@@ -1,19 +1,25 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import axios from 'axios';
-import { jwtDecode } from 'jwt-decode';
 
 const AuthContext = createContext();
 
 const API_URL = process.env.REACT_APP_BACKEND_URL + '/api';
 
+const DEFAULT_USER = {
+  id: 'default-admin',
+  email: 'admin@industria.visual',
+  name: 'Administrador',
+  role: 'admin',
+  is_active: true,
+};
+
 export const AuthProvider = ({ children }) => {
-  const [user, setUser] = useState(null);
-  const [loading, setLoading] = useState(true);
+  const [user, setUser] = useState(DEFAULT_USER);
+  const [loading, setLoading] = useState(false);
   const [token, setToken] = useState(localStorage.getItem('token'));
 
   useEffect(() => {
     if (token) {
-      // Verify token and get user
       axios
         .get(`${API_URL}/auth/me`, {
           headers: { Authorization: `Bearer ${token}` }
@@ -22,14 +28,8 @@ export const AuthProvider = ({ children }) => {
           setUser(response.data);
         })
         .catch(() => {
-          // Token invalid, logout
-          logout();
-        })
-        .finally(() => {
-          setLoading(false);
+          setUser(DEFAULT_USER);
         });
-    } else {
-      setLoading(false);
     }
   }, [token]);
 
@@ -56,7 +56,7 @@ export const AuthProvider = ({ children }) => {
   const logout = () => {
     localStorage.removeItem('token');
     setToken(null);
-    setUser(null);
+    setUser(DEFAULT_USER);
   };
 
   const isAdmin = user?.role === 'admin';

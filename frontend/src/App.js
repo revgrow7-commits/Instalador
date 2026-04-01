@@ -43,20 +43,6 @@ const PageLoader = () => (
 );
 
 const ProtectedRoute = ({ children }) => {
-  const { user, loading } = useAuth();
-
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center h-screen bg-background">
-        <div className="loading-pulse text-primary text-2xl font-heading">Carregando...</div>
-      </div>
-    );
-  }
-
-  if (!user) {
-    return <Navigate to="/login" replace />;
-  }
-
   return children;
 };
 
@@ -333,7 +319,7 @@ const AppRoutes = () => {
       />
       <Route
         path="/"
-        element={<Navigate to={user ? "/dashboard" : "/login"} replace />}
+        element={<Navigate to="/dashboard" replace />}
       />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

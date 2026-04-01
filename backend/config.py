@@ -8,6 +8,13 @@ from dotenv import load_dotenv
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
+# Supabase
+SUPABASE_URL = os.environ.get('SUPABASE_URL', '')
+SUPABASE_SERVICE_KEY = os.environ.get('SUPABASE_SERVICE_KEY', '')
+
+# Vercel Cron
+CRON_SECRET = os.environ.get('CRON_SECRET', '')
+
 # JWT Settings
 SECRET_KEY = os.environ.get('JWT_SECRET', 'your-secret-key-change-in-production')
 ALGORITHM = "HS256"
@@ -38,15 +45,18 @@ VAPID_CLAIMS_EMAIL = os.environ.get('VAPID_CLAIMS_EMAIL', 'bruno@industriavisual
 # GPS/Location Settings
 MAX_CHECKOUT_DISTANCE_METERS = 500
 
-# Upload directory
-UPLOAD_DIR = ROOT_DIR / "uploads"
-UPLOAD_DIR.mkdir(exist_ok=True, parents=True)
+# Upload directory (use /tmp for Vercel serverless compatibility)
+UPLOAD_DIR = Path("/tmp/uploads")
+try:
+    UPLOAD_DIR.mkdir(exist_ok=True)
+except Exception:
+    pass
 
 # Pause reasons
 PAUSE_REASONS = [
     "aguardando_cliente",
     "chuva",
-    "falta_material", 
+    "falta_material",
     "almoco_intervalo",
     "problema_acesso",
     "problema_equipamento",
@@ -74,7 +84,7 @@ PRODUCT_FAMILY_MAPPING = {
         "lona", "banner", "faixa", "empena", "faixa de gradil"
     ],
     "Chapas e Placas": [
-        "chapa", "placa", "acm", "acrílico", "mdf", "ps", "pvc", "polionda", 
+        "chapa", "placa", "acm", "acrílico", "mdf", "ps", "pvc", "polionda",
         "policarbonato", "petg", "compensado", "xps"
     ],
     "Estruturas Metálicas": [
@@ -96,7 +106,7 @@ PRODUCT_FAMILY_MAPPING = {
         "painel backlight", "painel luminoso", "backlight"
     ],
     "Serviços": [
-        "serviço", "serviços", "instalação", "entrega", "montagem", 
+        "serviço", "serviços", "instalação", "entrega", "montagem",
         "pintura", "serralheria", "solda", "corte", "aplicação"
     ],
     "Materiais Promocionais": [
