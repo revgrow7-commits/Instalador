@@ -39,8 +39,8 @@ VAPID_CLAIMS_EMAIL = os.environ.get('VAPID_CLAIMS_EMAIL', 'bruno@industriavisual
 MAX_CHECKOUT_DISTANCE_METERS = 500
 
 # Upload directory
-UPLOAD_DIR = Path("/app/uploads")
-UPLOAD_DIR.mkdir(exist_ok=True)
+UPLOAD_DIR = ROOT_DIR / "uploads"
+UPLOAD_DIR.mkdir(exist_ok=True, parents=True)
 
 # Pause reasons
 PAUSE_REASONS = [

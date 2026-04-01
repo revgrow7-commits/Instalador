@@ -6,6 +6,7 @@ import './App.css';
 
 // Lazy load all pages for better performance
 const Login = lazy(() => import('./pages/Login'));
+const InstallerLogin = lazy(() => import('./pages/InstallerLogin'));
 const Register = lazy(() => import('./pages/Register'));
 const ForgotPassword = lazy(() => import('./pages/ForgotPassword'));
 const ResetPassword = lazy(() => import('./pages/ResetPassword'));
@@ -86,6 +87,16 @@ const AppRoutes = () => {
           user ? <Navigate to="/dashboard" replace /> : (
             <Suspense fallback={<PageLoader />}>
               <Login />
+            </Suspense>
+          )
+        }
+      />
+      <Route
+        path="/installer/login"
+        element={
+          user ? <Navigate to="/installer/dashboard" replace /> : (
+            <Suspense fallback={<PageLoader />}>
+              <InstallerLogin />
             </Suspense>
           )
         }

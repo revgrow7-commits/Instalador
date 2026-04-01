@@ -597,11 +597,14 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
             raise credentials_exception
     except JWTError:
         raise credentials_exception
-    
-    user_doc = await db.users.find_one({"id": user_id}, {"_id": 0})
-    if user_doc is None:
-        raise credentials_exception
-    return User(**user_doc)
+
+    # Extract user data from JWT payload
+    email = payload.get("email")
+    role = payload.get("role", "user")
+    name = payload.get("name", email.split('@')[0] if email else user_id)
+
+    # Return user from JWT payload (no MongoDB required)
+    return User(id=user_id, email=email, name=name, role=role)
 
 async def require_role(user: User, allowed_roles: List[str]):
     if user.role not in allowed_roles:
@@ -993,16 +996,81 @@ async def reset_password(request: ResetPasswordRequest):
 async def verify_reset_token(token: str):
     """Verify if a reset token is valid"""
     reset_record = await db.password_resets.find_one({"token": token}, {"_id": 0})
-    
+
     if not reset_record:
         return {"valid": False, "message": "Token inválido"}
-    
+
     expires_at = datetime.fromisoformat(reset_record['expires_at'])
     if datetime.now(timezone.utc) > expires_at:
         await db.password_resets.delete_one({"token": token})
         return {"valid": False, "message": "Token expirado"}
-    
+
     return {"valid": True}
+
+
+# ============ INSTALLER AUTHENTICATION (Supabase) ============
+
+@api_router.post("/auth/installer/login")
+async def installer_login(credentials: dict):
+    """
+    Login for installers.
+    Uses Supabase in production or mock in development.
+    Expected request body: {"email": "...", "password": "..."}
+    """
+    # Check if using mock auth for local development
+    use_mock_auth = os.environ.get("USE_MOCK_AUTH", "true").lower() == "true"
+
+    if use_mock_auth:
+        from services.supabase_auth_mock import login_installer as login_func
+    else:
+        from services.supabase_auth import login_installer as login_func
+
+    email = credentials.get('email')
+    password = credentials.get('password')
+
+    if not email or not password:
+        raise HTTPException(status_code=400, detail="Email e senha são obrigatórios")
+
+    result = await login_func(email, password)
+
+    # Generate JWT token for session management
+    access_token = create_access_token(
+        data={
+            "sub": result['user']['id'],
+            "email": result['user']['email'],
+            "role": result['user']['role'],
+            "name": result['user'].get('name', result['user']['email'].split('@')[0])
+        }
+    )
+
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "user": result['user']
+    }
+
+
+@api_router.get("/auth/installer/me")
+async def get_installer_me(current_user: User = Depends(get_current_user)):
+    """Get current installer user info"""
+    return {
+        "id": current_user.id,
+        "email": current_user.email,
+        "name": current_user.name,
+        "role": current_user.role
+    }
+
+
+@api_router.get("/auth/me")
+async def get_me(current_user: User = Depends(get_current_user)):
+    """Get current user info (works for both regular and installer users)"""
+    return {
+        "id": current_user.id,
+        "email": current_user.email,
+        "name": current_user.name,
+        "role": current_user.role
+    }
+
 
 @api_router.put("/users/{user_id}/reset-password")
 async def admin_reset_password(
@@ -1300,9 +1368,8 @@ async def change_password(
 # NOTE: Legacy check-in routes have been migrated to routes/checkins.py
 # The router is included via: api_router.include_router(checkins_router, tags=["Check-ins"])
 
-# Create uploads directory if it doesn't exist
-UPLOAD_DIR = Path("/app/uploads")
-UPLOAD_DIR.mkdir(exist_ok=True)
+# Create uploads directory if it doesn't exist (already done in config.py)
+# UPLOAD_DIR is imported from config above
 
 
 async def detect_product_family(product_names: list) -> tuple:
@@ -1828,10 +1895,18 @@ async def health_check():
     """Health check endpoint for Kubernetes liveness/readiness probes"""
     return {"status": "healthy", "service": "industria-visual-api"}
 
+# Configure CORS
+cors_origins = os.environ.get('CORS_ORIGINS', '*').split(',')
+# Clean up whitespace
+cors_origins = [origin.strip() for origin in cors_origins if origin.strip()]
+
+# For development with credentials, use specific origins or disable credentials
+use_credentials = os.environ.get('NODE_ENV') != 'development'
+
 app.add_middleware(
     CORSMiddleware,
-    allow_credentials=True,
-    allow_origins=os.environ.get('CORS_ORIGINS', '*').split(','),
+    allow_credentials=use_credentials,
+    allow_origins=cors_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )

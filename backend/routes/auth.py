@@ -196,5 +196,48 @@ async def verify_reset_token(token: str):
     if datetime.now(timezone.utc) > expires_at:
         await db.password_resets.delete_one({"token": token})
         return {"valid": False, "message": "Token expirado"}
-    
+
     return {"valid": True}
+
+
+# ============ INSTALLER AUTHENTICATION (Supabase) ============
+
+@router.post("/auth/installer/login")
+async def installer_login(credentials: dict):
+    """
+    Login for installers using Supabase gateway_users table.
+    Expected request body: {"email": "...", "password": "..."}
+    """
+    from services.supabase_auth import login_installer
+
+    email = credentials.get('email')
+    password = credentials.get('password')
+
+    if not email or not password:
+        raise HTTPException(status_code=400, detail="Email e senha são obrigatórios")
+
+    result = await login_installer(email, password)
+
+    # Generate JWT token for session management
+    access_token = create_access_token(
+        data={"sub": result['user']['id'], "email": result['user']['email'], "role": result['user']['role']}
+    )
+
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "user": result['user']
+    }
+
+
+@router.get("/auth/installer/me")
+async def get_installer_me(current_user: User = Depends(get_current_user)):
+    """Get current installer user info"""
+    from services.supabase_auth import InstallerResponse
+
+    return {
+        "id": current_user.id,
+        "email": current_user.email,
+        "name": current_user.name,
+        "role": current_user.role
+    }

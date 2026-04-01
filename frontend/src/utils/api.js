@@ -34,7 +34,19 @@ const clearCache = (key = null) => {
 export const api = {
   // Cache control
   clearCache,
-  
+
+  // Generic methods (with auth header)
+  post: (path, data = {}) => {
+    // Don't require auth for login endpoints
+    if (path.includes('login') || path.includes('register') || path.includes('forgot-password') || path.includes('reset-password')) {
+      return axios.post(`${API_URL}${path}`, data);
+    }
+    return axios.post(`${API_URL}${path}`, data, { headers: getAuthHeader() });
+  },
+  get: (path) => axios.get(`${API_URL}${path}`, { headers: getAuthHeader() }),
+  put: (path, data = {}) => axios.put(`${API_URL}${path}`, data, { headers: getAuthHeader() }),
+  delete: (path) => axios.delete(`${API_URL}${path}`, { headers: getAuthHeader() }),
+
   // Auth
   login: (email, password) => {
     clearCache(); // Clear all cache on login
