@@ -1768,6 +1768,33 @@ async def trello_search_cards(
 async def root():
     return {"message": "INDÚSTRIA VISUAL API", "status": "online"}
 
+
+@api_router.get("/debug/db")
+async def debug_db():
+    """Temporary diagnostic endpoint - remove after debugging"""
+    import traceback
+    results = {}
+    try:
+        results["supabase_url"] = os.environ.get("SUPABASE_URL", "NOT_SET")[:40] + "..."
+        results["supabase_key_set"] = bool(os.environ.get("SUPABASE_SERVICE_KEY"))
+        results["holdprint_poa_set"] = bool(os.environ.get("HOLDPRINT_API_KEY_POA"))
+        results["holdprint_sp_set"] = bool(os.environ.get("HOLDPRINT_API_KEY_SP"))
+    except Exception as e:
+        results["env_error"] = str(e)
+    try:
+        test = await asyncio.to_thread(lambda: supabase.table('users').select('id').limit(1).execute())
+        results["users_table"] = "OK" if test.data is not None else "EMPTY"
+        results["users_count"] = len(test.data) if test.data else 0
+    except Exception as e:
+        results["users_table"] = f"ERROR: {str(e)}"
+        results["users_traceback"] = traceback.format_exc()[-500:]
+    try:
+        test2 = await asyncio.to_thread(lambda: supabase.table('jobs').select('id').limit(1).execute())
+        results["jobs_table"] = "OK" if test2.data is not None else "EMPTY"
+    except Exception as e:
+        results["jobs_table"] = f"ERROR: {str(e)}"
+    return results
+
 # Include router
 app.include_router(api_router)
 
