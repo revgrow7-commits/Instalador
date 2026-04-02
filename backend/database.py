@@ -27,8 +27,8 @@ async def sb_find_one(table: str, filters: dict):
         query = supabase.table(table).select('*')
         for key, value in filters.items():
             query = query.eq(key, value)
-        result = query.maybe_single().execute()
-        return result.data
+        result = query.limit(1).execute()
+        return result.data[0] if result.data else None
     return await asyncio.to_thread(_run)
 
 
