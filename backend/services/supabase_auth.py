@@ -79,9 +79,17 @@ async def login_installer(email: str, password: str) -> Dict[str, Any]:
                 logger.warning(f"User account inactive: {email}")
                 raise HTTPException(status_code=401, detail="Conta desativada. Entre em contato com o gerente.")
 
-            # Verify password (in production, use bcrypt comparison)
-            # For now, we'll rely on Supabase RLS to prevent unauthorized access
-            # The password verification should be done through Supabase Auth
+            # Verify password using bcrypt
+            password_hash = user.get('password_hash', '')
+            if not password_hash:
+                logger.error(f"User has no password hash: {email}")
+                raise HTTPException(status_code=401, detail="Credenciais inválidas")
+
+            from passlib.context import CryptContext
+            _pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+            if not _pwd_context.verify(password, password_hash):
+                logger.warning(f"Invalid password for user: {email}")
+                raise HTTPException(status_code=401, detail="Credenciais inválidas")
 
             # Update last login timestamp
             await update_last_login(user['id'])

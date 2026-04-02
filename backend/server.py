@@ -56,7 +56,7 @@ from config import (
     MAX_CHECKOUT_DISTANCE_METERS, UPLOAD_DIR,
     PAUSE_REASONS, PAUSE_REASON_LABELS, PRODUCT_FAMILY_MAPPING
 )
-from database import supabase, db, sb_find_one, sb_find_many, sb_insert, sb_update, sb_delete, sb_delete_many, sb_count, sb_upsert
+from database import supabase, sb_find_one, sb_find_many, sb_insert, sb_update, sb_delete, sb_delete_many, sb_count, sb_upsert
 
 # Import services
 from services.product_classifier import classify_product_to_family, extract_product_measures, calculate_job_products_area
@@ -65,9 +65,8 @@ from services.image import compress_image_to_base64, compress_base64_image
 from services.gps import calculate_gps_distance
 from services.gamification import calculate_checkout_coins, add_coins, calculate_level, COIN_REWARDS
 
-# Security setup (kept here for backward compatibility, also in security.py)
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-security = HTTPBearer()
+# Security - imported from security.py
+from security import get_current_user, verify_password, get_password_hash, create_access_token, require_role
 
 # Resend setup
 resend.api_key = RESEND_API_KEY
@@ -573,43 +572,8 @@ def calculate_gps_distance(lat1: float, lon1: float, lat2: float, lon2: float) -
 # Maximum distance in meters before triggering location alert
 MAX_CHECKOUT_DISTANCE_METERS = 500
 
-def verify_password(plain_password, hashed_password):
-    return pwd_context.verify(plain_password, hashed_password)
-
-def get_password_hash(password):
-    return pwd_context.hash(password)
-
-def create_access_token(data: dict):
-    to_encode = data.copy()
-    expire = datetime.now(timezone.utc) + timedelta(days=ACCESS_TOKEN_EXPIRE_DAYS)
-    to_encode.update({"exp": expire})
-    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-    return encoded_jwt
-
-async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
-    credentials_exception = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Could not validate credentials",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
-    try:
-        token = credentials.credentials
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        user_id: str = payload.get("sub")
-        if user_id is None:
-            raise credentials_exception
-    except JWTError:
-        raise credentials_exception
-    
-    user_doc = await sb_find_one('users', {'id': user_id})
-    if user_doc is None:
-        raise credentials_exception
-    return User(**user_doc)
-
-async def require_role(user: User, allowed_roles: List[str]):
-    if user.role not in allowed_roles:
-        raise HTTPException(status_code=403, detail="Insufficient permissions")
-    return user
+# verify_password, get_password_hash, create_access_token, get_current_user, require_role
+# are imported from security.py above
 
 def compress_image_to_base64(image_data: bytes, max_size_kb: int = 300, max_dimension: int = 1200) -> str:
     """
@@ -1641,36 +1605,8 @@ from routes.jobs import router as jobs_router
 api_router.include_router(jobs_router, tags=["Jobs"])
 
 
-# ============ SCHEDULER MANAGEMENT ROUTES ============
 
-@api_router.get("/scheduler/jobs")
-async def get_scheduler_jobs(current_user: User = Depends(get_current_user)):
-    """List all scheduled jobs and their status"""
-    await require_role(current_user, [UserRole.ADMIN, UserRole.MANAGER])
 
-    return {
-        "scheduler_running": False,
-        "jobs": [],
-        "message": "Scheduler replaced by Vercel Cron. Use /api/cron/sync-holdprint endpoint."
-    }
-
-@api_router.post("/scheduler/jobs/{job_id}/pause")
-async def pause_scheduler_job(job_id: str, current_user: User = Depends(get_current_user)):
-    """Pause a scheduled job (no-op: scheduler replaced by Vercel Cron)"""
-    await require_role(current_user, [UserRole.ADMIN])
-    return {"success": True, "message": "Scheduler replaced by Vercel Cron. No action taken."}
-
-@api_router.post("/scheduler/jobs/{job_id}/resume")
-async def resume_scheduler_job(job_id: str, current_user: User = Depends(get_current_user)):
-    """Resume a paused job (no-op: scheduler replaced by Vercel Cron)"""
-    await require_role(current_user, [UserRole.ADMIN])
-    return {"success": True, "message": "Scheduler replaced by Vercel Cron. No action taken."}
-
-@api_router.post("/scheduler/jobs/{job_id}/run-now")
-async def run_scheduler_job_now(job_id: str, current_user: User = Depends(get_current_user)):
-    """Trigger a job to run immediately (no-op: scheduler replaced by Vercel Cron)"""
-    await require_role(current_user, [UserRole.ADMIN, UserRole.MANAGER])
-    return {"success": True, "message": "Scheduler replaced by Vercel Cron. Use /api/cron/sync-holdprint to trigger sync."}
 
 
 # ============ TRELLO PCP INTEGRATION ============

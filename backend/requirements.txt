@@ -42,9 +42,7 @@ py-vapid==1.9.4
 # Excel handling
 openpyxl==3.1.5
 
-# Scheduling
-apscheduler==3.11.2
-tzlocal==5.3.1
+# Scheduling (removed APScheduler — Vercel Cron is used instead)
 
 # Date handling
 python-dateutil==2.9.0.post0

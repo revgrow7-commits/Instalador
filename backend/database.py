@@ -16,8 +16,6 @@ SUPABASE_SERVICE_KEY = os.environ.get('SUPABASE_SERVICE_KEY', os.environ.get('SU
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
-# Alias para compatibilidade com código existente
-db = supabase
 
 
 # ============ HELPERS ASYNC ============
