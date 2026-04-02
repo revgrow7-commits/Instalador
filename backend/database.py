@@ -11,8 +11,8 @@ from supabase import create_client, Client
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-SUPABASE_URL = os.environ['SUPABASE_URL']
-SUPABASE_SERVICE_KEY = os.environ['SUPABASE_SERVICE_KEY']
+SUPABASE_URL = os.environ.get('SUPABASE_URL', '')
+SUPABASE_SERVICE_KEY = os.environ.get('SUPABASE_SERVICE_KEY', os.environ.get('SUPABASE_ANON_KEY', ''))
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
