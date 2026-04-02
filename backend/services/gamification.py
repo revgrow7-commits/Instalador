@@ -2,8 +2,7 @@
 Gamification service - coin calculations and rewards.
 """
 from datetime import datetime, timezone
-from database import sb_find_one, sb_insert, sb_update
-import uuid
+from database import db
 
 # Coin reward values
 COIN_REWARDS = {
@@ -50,11 +49,10 @@ async def add_coins(user_id: str, amount: int, transaction_type: str, descriptio
     Returns updated balance info.
     """
     # Get or create balance
-    balance = await sb_find_one('coin_balances', {"user_id": user_id})
-
+    balance = await db.gamification_balances.find_one({"user_id": user_id}, {"_id": 0})
+    
     if not balance:
         balance = {
-            "id": str(uuid.uuid4()),
             "user_id": user_id,
             "coins": 0,
             "level": 1,
@@ -64,26 +62,28 @@ async def add_coins(user_id: str, amount: int, transaction_type: str, descriptio
             "last_activity": None,
             "created_at": datetime.now(timezone.utc).isoformat()
         }
-        await sb_insert('coin_balances', balance)
-
+        await db.gamification_balances.insert_one(balance)
+    
     # Calculate new balance
     new_coins = balance.get("coins", 0) + amount
     new_total_earned = balance.get("total_earned", 0) + (amount if amount > 0 else 0)
     new_total_redeemed = balance.get("total_redeemed", 0) + (abs(amount) if amount < 0 else 0)
     new_level = calculate_level(new_total_earned)
-
+    
     # Update balance
-    await sb_update('coin_balances', balance['id'], {
-        "coins": new_coins,
-        "total_earned": new_total_earned,
-        "total_redeemed": new_total_redeemed,
-        "level": new_level,
-        "last_activity": datetime.now(timezone.utc).isoformat()
-    })
-
+    await db.gamification_balances.update_one(
+        {"user_id": user_id},
+        {"$set": {
+            "coins": new_coins,
+            "total_earned": new_total_earned,
+            "total_redeemed": new_total_redeemed,
+            "level": new_level,
+            "last_activity": datetime.now(timezone.utc).isoformat()
+        }}
+    )
+    
     # Record transaction
     transaction = {
-        "id": str(uuid.uuid4()),
         "user_id": user_id,
         "amount": amount,
         "transaction_type": transaction_type,
@@ -93,7 +93,7 @@ async def add_coins(user_id: str, amount: int, transaction_type: str, descriptio
         "balance_after": new_coins,
         "created_at": datetime.now(timezone.utc).isoformat()
     }
-    await sb_insert('coin_transactions', transaction)
+    await db.gamification_transactions.insert_one(transaction)
     
     return {
         "coins": new_coins,

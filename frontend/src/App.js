@@ -6,7 +6,6 @@ import './App.css';
 
 // Lazy load all pages for better performance
 const Login = lazy(() => import('./pages/Login'));
-const InstallerLogin = lazy(() => import('./pages/InstallerLogin'));
 const Register = lazy(() => import('./pages/Register'));
 const ForgotPassword = lazy(() => import('./pages/ForgotPassword'));
 const ResetPassword = lazy(() => import('./pages/ResetPassword'));
@@ -43,6 +42,20 @@ const PageLoader = () => (
 );
 
 const ProtectedRoute = ({ children }) => {
+  const { user, loading } = useAuth();
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center h-screen bg-background">
+        <div className="loading-pulse text-primary text-2xl font-heading">Carregando...</div>
+      </div>
+    );
+  }
+
+  if (!user) {
+    return <Navigate to="/login" replace />;
+  }
+
   return children;
 };
 
@@ -73,16 +86,6 @@ const AppRoutes = () => {
           user ? <Navigate to="/dashboard" replace /> : (
             <Suspense fallback={<PageLoader />}>
               <Login />
-            </Suspense>
-          )
-        }
-      />
-      <Route
-        path="/installer/login"
-        element={
-          user ? <Navigate to="/installer/dashboard" replace /> : (
-            <Suspense fallback={<PageLoader />}>
-              <InstallerLogin />
             </Suspense>
           )
         }
@@ -319,7 +322,7 @@ const AppRoutes = () => {
       />
       <Route
         path="/"
-        element={<Navigate to="/dashboard" replace />}
+        element={<Navigate to={user ? "/dashboard" : "/login"} replace />}
       />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

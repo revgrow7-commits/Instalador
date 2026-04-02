@@ -8,9 +8,8 @@ from datetime import datetime, timezone
 import uuid
 import logging
 import math
-import asyncio
 
-from database import supabase, sb_find_one, sb_find_many, sb_insert, sb_update, sb_delete, sb_delete_many, sb_upsert
+from database import db
 from security import get_current_user, require_role
 from models.user import User, UserRole
 from models.product import ProductInstalled
@@ -24,7 +23,7 @@ MAX_CHECKOUT_DISTANCE_METERS = 500
 # Pause reason labels
 PAUSE_REASONS = [
     "almoço",
-    "banheiro",
+    "banheiro", 
     "esperando_material",
     "problema_tecnico",
     "atendimento_cliente",
@@ -49,23 +48,23 @@ def compress_base64_image(base64_string: str, max_size_kb: int = 300, max_dimens
     """Compress a base64-encoded image string."""
     if not base64_string:
         return base64_string
-
+    
     try:
         import base64
         from io import BytesIO
         from PIL import Image
-
+        
         if ',' in base64_string:
             base64_string = base64_string.split(',')[1]
-
+        
         image_data = base64.b64decode(base64_string)
         original_size_kb = len(image_data) / 1024
-
+        
         if original_size_kb <= max_size_kb:
             return base64_string
-
+        
         img = Image.open(BytesIO(image_data))
-
+        
         if img.mode in ('RGBA', 'P', 'LA'):
             background = Image.new('RGB', img.size, (255, 255, 255))
             if img.mode == 'P':
@@ -74,24 +73,24 @@ def compress_base64_image(base64_string: str, max_size_kb: int = 300, max_dimens
             img = background
         elif img.mode != 'RGB':
             img = img.convert('RGB')
-
+        
         if img.width > max_dimension or img.height > max_dimension:
             ratio = min(max_dimension / img.width, max_dimension / img.height)
             new_size = (int(img.width * ratio), int(img.height * ratio))
             img = img.resize(new_size, Image.Resampling.LANCZOS)
-
+        
         quality = 85
         output = BytesIO()
-
+        
         while quality >= 20:
             output = BytesIO()
             img.save(output, format='JPEG', quality=quality, optimize=True)
             if len(output.getvalue()) / 1024 <= max_size_kb:
                 break
             quality -= 5
-
+        
         return base64.b64encode(output.getvalue()).decode('utf-8')
-
+        
     except Exception as e:
         logger.error(f"Error compressing image: {e}")
         return base64_string
@@ -100,22 +99,22 @@ def compress_base64_image(base64_string: str, max_size_kb: int = 300, max_dimens
 def calculate_gps_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     """Calculate distance between two GPS coordinates in meters using Haversine formula."""
     R = 6371000  # Earth's radius in meters
-
+    
     phi1 = math.radians(lat1)
     phi2 = math.radians(lat2)
     delta_phi = math.radians(lat2 - lat1)
     delta_lambda = math.radians(lon2 - lon1)
-
+    
     a = math.sin(delta_phi/2)**2 + math.cos(phi1) * math.cos(phi2) * math.sin(delta_lambda/2)**2
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
-
+    
     return R * c
 
 
 async def detect_product_family(product_names: list) -> tuple:
     """Detects the product family based on product names."""
-    families = await sb_find_many('product_families')
-
+    families = await db.product_families.find({}, {"_id": 0}).to_list(100)
+    
     family_keywords = {
         "adesivos": ["adesivo", "vinil", "adesivos", "plotagem", "recorte"],
         "lonas": ["lona", "banner", "faixa", "frontlight", "backlight"],
@@ -123,27 +122,27 @@ async def detect_product_family(product_names: list) -> tuple:
         "painéis": ["painel", "outdoor", "totem", "display"],
         "outros": []
     }
-
+    
     for name in product_names:
         name_lower = name.lower() if name else ""
-
+        
         for family in families:
             family_name_lower = family.get("name", "").lower()
-
+            
             if family_name_lower in name_lower:
                 return family.get("id"), family.get("name")
-
+            
             keywords = family_keywords.get(family_name_lower, [])
             for keyword in keywords:
                 if keyword in name_lower:
                     return family.get("id"), family.get("name")
-
+    
     if families:
         outros = next((f for f in families if "outro" in f.get("name", "").lower()), None)
         if outros:
             return outros.get("id"), outros.get("name")
         return families[0].get("id"), families[0].get("name")
-
+    
     return None, None
 
 
@@ -227,19 +226,19 @@ async def create_item_checkin(
     """Create a check-in for a specific item in a job"""
     if current_user.role != UserRole.INSTALLER:
         raise HTTPException(status_code=403, detail="Only installers can create item check-ins")
-
-    installer = await sb_find_one('installers', {"user_id": current_user.id})
+    
+    installer = await db.installers.find_one({"user_id": current_user.id}, {"_id": 0})
     if not installer:
         raise HTTPException(status_code=404, detail="Installer not found")
-
-    job = await sb_find_one('jobs', {"id": job_id})
+    
+    job = await db.jobs.find_one({"id": job_id}, {"_id": 0})
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-
+    
     # Check if installer is assigned
     job_assigned_installers = job.get("assigned_installers", [])
     item_assignments = job.get("item_assignments", [])
-
+    
     item_assigned = False
     for assignment in item_assignments:
         if assignment.get("item_index") == item_index:
@@ -249,20 +248,20 @@ async def create_item_checkin(
             if installer["id"] in assignment.get("installer_ids", []):
                 item_assigned = True
                 break
-
+    
     if not item_assigned and installer["id"] not in job_assigned_installers:
         raise HTTPException(status_code=403, detail="Você não está atribuído a este item")
-
+    
     products = job.get("products_with_area", [])
     if not products:
         products = job.get("items", [])
-
+    
     if not products or item_index >= len(products):
         raise HTTPException(status_code=400, detail=f"Item inválido. O job tem {len(products)} itens.")
-
+    
     product = products[item_index]
-
-    existing = await sb_find_one('item_checkins', {
+    
+    existing = await db.item_checkins.find_one({
         "job_id": job_id,
         "item_index": item_index,
         "installer_id": installer["id"],
@@ -270,13 +269,13 @@ async def create_item_checkin(
     })
     if existing:
         raise HTTPException(status_code=400, detail="Item already has an active check-in")
-
+    
     family_id, family_name = await detect_product_family([product.get("name", "")])
-
+    
     compressed_photo = None
     if photo_base64:
         compressed_photo = compress_base64_image(photo_base64, max_size_kb=300, max_dimension=1200)
-
+    
     item_checkin = ItemCheckin(
         job_id=job_id,
         item_index=item_index,
@@ -288,13 +287,15 @@ async def create_item_checkin(
         product_name=product.get("name", f"Item {item_index}"),
         family_name=family_name
     )
-
+    
     checkin_dict = item_checkin.model_dump()
     checkin_dict['checkin_at'] = checkin_dict['checkin_at'].isoformat()
-    await sb_insert('item_checkins', checkin_dict)
-
-    await sb_update('jobs', job_id, {"status": "in_progress"})
-
+    await db.item_checkins.insert_one(checkin_dict)
+    
+    checkin_dict.pop('_id', None)
+    
+    await db.jobs.update_one({"id": job_id}, {"$set": {"status": "in_progress"}})
+    
     return checkin_dict
 
 
@@ -304,27 +305,31 @@ async def get_item_checkins(
     current_user: User = Depends(get_current_user)
 ):
     """Get item check-ins for a job - optimized"""
-    filters = {}
-
+    query = {}
+    
     if current_user.role == UserRole.INSTALLER:
-        installer = await sb_find_one('installers', {"user_id": current_user.id})
+        installer = await db.installers.find_one({"user_id": current_user.id}, {"_id": 0, "id": 1})
         if installer:
-            filters["installer_id"] = installer["id"]
-
+            query["installer_id"] = installer["id"]
+    
     if job_id:
-        filters["job_id"] = job_id
-
-    checkins = await sb_find_many('item_checkins', filters if filters else None, order_by='checkin_at', limit=500)
-
-    # Exclude heavy photo fields
+        query["job_id"] = job_id
+    
+    # Exclui fotos pesadas da listagem
+    projection = {
+        "_id": 0,
+        "checkin_photo": 0,
+        "checkout_photo": 0
+    }
+    
+    checkins = await db.item_checkins.find(query, projection).sort("checkin_at", -1).to_list(500)
+    
     for c in checkins:
-        c.pop('checkin_photo', None)
-        c.pop('checkout_photo', None)
         if isinstance(c.get('checkin_at'), str):
             c['checkin_at'] = datetime.fromisoformat(c['checkin_at'])
         if c.get('checkout_at') and isinstance(c['checkout_at'], str):
             c['checkout_at'] = datetime.fromisoformat(c['checkout_at'])
-
+    
     return checkins
 
 
@@ -334,32 +339,35 @@ async def get_all_item_checkins(
 ):
     """Get all item check-ins for reports (Admin/Manager only) - optimized"""
     await require_role(current_user, [UserRole.ADMIN, UserRole.MANAGER])
-
-    checkins = await sb_find_many('item_checkins', order_by='checkin_at', limit=1000)
-
-    # Exclude heavy photo fields
-    for c in checkins:
-        c.pop('checkin_photo', None)
-        c.pop('checkout_photo', None)
-
-    # Fetch jobs and installers in parallel with minimal projection
-    jobs, installers = await asyncio.gather(
-        sb_find_many('jobs'),
-        sb_find_many('installers')
-    )
-
+    
+    # Projeção otimizada - exclui fotos base64 pesadas
+    projection = {
+        "_id": 0,
+        "checkin_photo": 0,
+        "checkout_photo": 0
+    }
+    
+    checkins = await db.item_checkins.find({}, projection).sort("checkin_at", -1).to_list(1000)
+    
+    # Busca jobs e installers em paralelo com projeção mínima
+    jobs_cursor = db.jobs.find({}, {"_id": 0, "id": 1, "title": 1, "client_name": 1})
+    installers_cursor = db.installers.find({}, {"_id": 0, "id": 1, "full_name": 1})
+    
+    jobs = await jobs_cursor.to_list(500)
+    installers = await installers_cursor.to_list(100)
+    
     jobs_map = {job["id"]: job for job in jobs}
     installers_map = {inst["id"]: inst for inst in installers}
-
+    
     enriched_checkins = []
     for c in checkins:
         job = jobs_map.get(c.get("job_id"), {})
         installer = installers_map.get(c.get("installer_id"), {})
-
+        
         checkin_at = c.get("checkin_at", "")
         if isinstance(checkin_at, datetime):
             checkin_at = checkin_at.isoformat()
-
+        
         enriched = {
             **c,
             "checkin_at": checkin_at,
@@ -368,9 +376,9 @@ async def get_all_item_checkins(
             "installer_name": installer.get("full_name", "N/A")
         }
         enriched_checkins.append(enriched)
-
+    
     enriched_checkins.sort(key=lambda x: x.get("checkin_at", ""), reverse=True)
-
+    
     return enriched_checkins
 
 
@@ -392,33 +400,33 @@ async def complete_item_checkout(
     import logging
     logger = logging.getLogger(__name__)
     logger.info(f"Checkout request for checkin {checkin_id} by user {current_user.email} (role: {current_user.role})")
-
+    
     if current_user.role != UserRole.INSTALLER:
         logger.error(f"User {current_user.email} is not an installer (role: {current_user.role})")
         raise HTTPException(status_code=403, detail="Only installers can complete item checkouts")
-
-    checkin = await sb_find_one('item_checkins', {"id": checkin_id})
+    
+    checkin = await db.item_checkins.find_one({"id": checkin_id}, {"_id": 0})
     if not checkin:
         logger.error(f"Checkin {checkin_id} not found")
         raise HTTPException(status_code=404, detail="Item check-in not found")
-
+    
     logger.info(f"Checkin status: {checkin.get('status')}, installed_m2: {installed_m2}")
-
+    
     if checkin["status"] == "completed":
         logger.error(f"Checkin {checkin_id} already completed")
         raise HTTPException(status_code=400, detail="Item already checked out")
-
+    
     # GPS Distance Validation
     location_alert = None
     auto_paused = False
     distance_meters = 0
-
+    
     checkin_lat = checkin.get("gps_lat")
     checkin_long = checkin.get("gps_long")
-
+    
     if checkin_lat and checkin_long and gps_lat and gps_long:
         distance_meters = calculate_gps_distance(checkin_lat, checkin_long, gps_lat, gps_long)
-
+        
         if distance_meters > MAX_CHECKOUT_DISTANCE_METERS:
             location_log = {
                 "id": str(uuid.uuid4()),
@@ -435,8 +443,8 @@ async def complete_item_checkout(
                 "created_at": datetime.now(timezone.utc).isoformat(),
                 "action_taken": "auto_pause"
             }
-            await sb_insert('location_alerts', location_log)
-
+            await db.location_alerts.insert_one(location_log)
+            
             if checkin["status"] != "paused":
                 pause_reason = f"Saiu do local sem justificar (distância: {round(distance_meters)}m)"
                 pause_log = {
@@ -448,9 +456,9 @@ async def complete_item_checkout(
                     "duration_minutes": 0,
                     "auto_generated": True
                 }
-                await sb_insert('item_pause_logs', pause_log)
+                await db.item_pause_logs.insert_one(pause_log)
                 auto_paused = True
-
+            
             location_alert = {
                 "type": "location_exceeded",
                 "message": f"Checkout realizado a {round(distance_meters)}m do local do check-in (máximo: {MAX_CHECKOUT_DISTANCE_METERS}m)",
@@ -458,13 +466,13 @@ async def complete_item_checkout(
                 "auto_paused": auto_paused
             }
             logger.warning(f"Location alert: Installer {checkin.get('installer_id')} checked out {round(distance_meters)}m from check-in location")
-
+    
     # End any active pause
     if checkin["status"] == "paused":
-        active_pause = await sb_find_one('item_pause_logs', {
+        active_pause = await db.item_pause_logs.find_one({
             "item_checkin_id": checkin_id,
             "end_time": None
-        })
+        }, {"_id": 0})
         if active_pause:
             end_time = datetime.now(timezone.utc)
             start_time = active_pause['start_time']
@@ -473,35 +481,38 @@ async def complete_item_checkout(
             if start_time.tzinfo is None:
                 start_time = start_time.replace(tzinfo=timezone.utc)
             pause_duration = int((end_time - start_time).total_seconds() / 60)
-            await sb_update('item_pause_logs', active_pause["id"], {"end_time": end_time.isoformat(), "duration_minutes": pause_duration})
-
+            await db.item_pause_logs.update_one(
+                {"id": active_pause["id"]},
+                {"$set": {"end_time": end_time.isoformat(), "duration_minutes": pause_duration}}
+            )
+    
     # Calculate durations
     checkin_at = checkin['checkin_at']
     if isinstance(checkin_at, str):
         checkin_at = datetime.fromisoformat(checkin_at.replace('Z', '+00:00'))
     if checkin_at.tzinfo is None:
         checkin_at = checkin_at.replace(tzinfo=timezone.utc)
-
+    
     checkout_at = datetime.now(timezone.utc)
-
+    
     # Calculate duration in minutes with decimal precision
     duration_seconds = (checkout_at - checkin_at).total_seconds()
     duration_minutes = round(duration_seconds / 60, 2)  # Keep decimal precision
-
-    pause_logs = await sb_find_many('item_pause_logs', {"item_checkin_id": checkin_id})
+    
+    pause_logs = await db.item_pause_logs.find({"item_checkin_id": checkin_id}, {"_id": 0}).to_list(100)
     total_pause_minutes = sum(p.get("duration_minutes", 0) or 0 for p in pause_logs)
-
+    
     net_duration_minutes = round(max(0, duration_minutes - total_pause_minutes), 2)
-
+    
     productivity_m2_h = None
     if installed_m2 and installed_m2 > 0 and net_duration_minutes > 0:
         hours = net_duration_minutes / 60
         productivity_m2_h = round(installed_m2 / hours, 2)
-
+    
     compressed_checkout_photo = None
     if photo_base64:
         compressed_checkout_photo = compress_base64_image(photo_base64, max_size_kb=300, max_dimension=1200)
-
+    
     update_data = {
         "checkout_at": checkout_at.isoformat(),
         "checkout_photo": compressed_checkout_photo,
@@ -519,17 +530,17 @@ async def complete_item_checkout(
         "productivity_m2_h": productivity_m2_h,
         "status": "completed"
     }
-
-    await sb_update('item_checkins', checkin_id, update_data)
-
+    
+    await db.item_checkins.update_one({"id": checkin_id}, {"$set": update_data})
+    
     # Register installed product
-    job = await sb_find_one('jobs', {"id": checkin["job_id"]})
+    job = await db.jobs.find_one({"id": checkin["job_id"]}, {"_id": 0})
     if job:
         products = job.get("products_with_area", [])
         product = products[checkin["item_index"]] if checkin["item_index"] < len(products) else {}
-
+        
         family_id, family_name = await detect_product_family([product.get("name", "")])
-
+        
         installed_product = ProductInstalled(
             job_id=checkin["job_id"],
             checkin_id=checkin_id,
@@ -546,14 +557,14 @@ async def complete_item_checkout(
             productivity_m2_h=productivity_m2_h,
             cause_notes=notes
         )
-
-        await sb_insert('installed_products', installed_product.model_dump())
+        
+        await db.installed_products.insert_one(installed_product.model_dump())
         await update_productivity_history(installed_product)
-
+    
     # Check job completion
-    job = await sb_find_one('jobs', {"id": checkin["job_id"]})
-    job_checkins = await sb_find_many('item_checkins', {"job_id": checkin["job_id"]})
-
+    job = await db.jobs.find_one({"id": checkin["job_id"]}, {"_id": 0})
+    job_checkins = await db.item_checkins.find({"job_id": checkin["job_id"]}, {"_id": 0}).to_list(1000)
+    
     item_assignments = job.get("item_assignments", []) if job else []
     assigned_item_indices = set()
     for assignment in item_assignments:
@@ -562,24 +573,24 @@ async def complete_item_checkout(
         if "item_indices" in assignment:
             for idx in assignment["item_indices"]:
                 assigned_item_indices.add(idx)
-
+    
     if not assigned_item_indices:
         products = job.get("products_with_area", []) if job else []
         assigned_item_indices = set(range(len(products)))
-
+    
     completed_item_indices = set(c["item_index"] for c in job_checkins if c["status"] == "completed")
     all_assigned_completed = assigned_item_indices.issubset(completed_item_indices) if assigned_item_indices else False
-
+    
     if all_assigned_completed and len(assigned_item_indices) > 0:
-        await sb_update('jobs', checkin["job_id"], {"status": "completed"})
-
+        await db.jobs.update_one({"id": checkin["job_id"]}, {"$set": {"status": "completed"}})
+    
     # Return result
-    result = await sb_find_one('item_checkins', {"id": checkin_id})
-
+    result = await db.item_checkins.find_one({"id": checkin_id}, {"_id": 0})
+    
     if location_alert:
         result["location_alert"] = location_alert
         result["checkout_distance_meters"] = round(distance_meters, 2)
-
+    
     return result
 
 
@@ -590,14 +601,14 @@ async def delete_item_checkin(
 ):
     """Delete an item check-in - Only admin and managers"""
     await require_role(current_user, [UserRole.ADMIN, UserRole.MANAGER])
-
-    checkin = await sb_find_one('item_checkins', {"id": checkin_id})
+    
+    checkin = await db.item_checkins.find_one({"id": checkin_id})
     if not checkin:
         raise HTTPException(status_code=404, detail="Item check-in not found")
-
-    await sb_delete('item_checkins', checkin_id)
-    await sb_delete_many('installed_products', {"checkin_id": checkin_id})
-
+    
+    await db.item_checkins.delete_one({"id": checkin_id})
+    await db.installed_products.delete_many({"checkin_id": checkin_id})
+    
     return {"message": "Item check-in deleted successfully"}
 
 
@@ -608,13 +619,16 @@ async def archive_item_checkin(
 ):
     """Archive an item check-in - Only admin and managers"""
     await require_role(current_user, [UserRole.ADMIN, UserRole.MANAGER])
-
-    checkin = await sb_find_one('item_checkins', {"id": checkin_id})
+    
+    checkin = await db.item_checkins.find_one({"id": checkin_id})
     if not checkin:
         raise HTTPException(status_code=404, detail="Item check-in not found")
-
-    await sb_update('item_checkins', checkin_id, {"archived": True, "archived_at": datetime.now(timezone.utc).isoformat()})
-
+    
+    await db.item_checkins.update_one(
+        {"id": checkin_id},
+        {"$set": {"archived": True, "archived_at": datetime.now(timezone.utc).isoformat()}}
+    )
+    
     return {"message": "Item check-in archived successfully"}
 
 
@@ -628,26 +642,26 @@ async def pause_item_checkin(
     import logging
     logger = logging.getLogger(__name__)
     logger.info(f"Pause request for checkin {checkin_id} by user {current_user.email} (role: {current_user.role})")
-
+    
     if current_user.role != UserRole.INSTALLER:
         logger.error(f"User {current_user.email} is not an installer (role: {current_user.role})")
         raise HTTPException(status_code=403, detail="Only installers can pause item checkouts")
-
-    checkin = await sb_find_one('item_checkins', {"id": checkin_id})
+    
+    checkin = await db.item_checkins.find_one({"id": checkin_id}, {"_id": 0})
     if not checkin:
         logger.error(f"Checkin {checkin_id} not found")
         raise HTTPException(status_code=404, detail="Item check-in not found")
-
+    
     logger.info(f"Checkin status: {checkin.get('status')}")
-
+    
     if checkin["status"] == "completed":
         logger.error(f"Cannot pause completed checkin {checkin_id}")
         raise HTTPException(status_code=400, detail="Cannot pause a completed item")
-
+    
     if checkin["status"] == "paused":
         logger.error(f"Checkin {checkin_id} is already paused")
         raise HTTPException(status_code=400, detail="Item is already paused")
-
+    
     pause_log = ItemPauseLog(
         item_checkin_id=checkin_id,
         job_id=checkin["job_id"],
@@ -655,13 +669,16 @@ async def pause_item_checkin(
         installer_id=checkin["installer_id"],
         reason=reason
     )
-
+    
     pause_dict = pause_log.model_dump()
     pause_dict['start_time'] = pause_dict['start_time'].isoformat()
-    await sb_insert('item_pause_logs', pause_dict)
-
-    await sb_update('item_checkins', checkin_id, {"status": "paused"})
-
+    await db.item_pause_logs.insert_one(pause_dict)
+    
+    await db.item_checkins.update_one(
+        {"id": checkin_id},
+        {"$set": {"status": "paused"}}
+    )
+    
     return {
         "message": "Item paused successfully",
         "pause_id": pause_log.id,
@@ -678,35 +695,41 @@ async def resume_item_checkin(
     """Resume a paused item checkin"""
     if current_user.role != UserRole.INSTALLER:
         raise HTTPException(status_code=403, detail="Only installers can resume item checkouts")
-
-    checkin = await sb_find_one('item_checkins', {"id": checkin_id})
+    
+    checkin = await db.item_checkins.find_one({"id": checkin_id}, {"_id": 0})
     if not checkin:
         raise HTTPException(status_code=404, detail="Item check-in not found")
-
+    
     if checkin["status"] != "paused":
         raise HTTPException(status_code=400, detail="Item is not paused")
-
-    active_pause = await sb_find_one('item_pause_logs', {
+    
+    active_pause = await db.item_pause_logs.find_one({
         "item_checkin_id": checkin_id,
         "end_time": None
-    })
-
+    }, {"_id": 0})
+    
     if not active_pause:
         raise HTTPException(status_code=400, detail="No active pause found")
-
+    
     end_time = datetime.now(timezone.utc)
     start_time = active_pause['start_time']
     if isinstance(start_time, str):
         start_time = datetime.fromisoformat(start_time.replace('Z', '+00:00'))
     if start_time.tzinfo is None:
         start_time = start_time.replace(tzinfo=timezone.utc)
-
+    
     pause_duration = int((end_time - start_time).total_seconds() / 60)
-
-    await sb_update('item_pause_logs', active_pause["id"], {"end_time": end_time.isoformat(), "duration_minutes": pause_duration})
-
-    await sb_update('item_checkins', checkin_id, {"status": "in_progress"})
-
+    
+    await db.item_pause_logs.update_one(
+        {"id": active_pause["id"]},
+        {"$set": {"end_time": end_time.isoformat(), "duration_minutes": pause_duration}}
+    )
+    
+    await db.item_checkins.update_one(
+        {"id": checkin_id},
+        {"$set": {"status": "in_progress"}}
+    )
+    
     return {
         "message": "Item resumed successfully",
         "pause_duration_minutes": pause_duration,
@@ -720,14 +743,17 @@ async def get_item_pause_logs(
     current_user: User = Depends(get_current_user)
 ):
     """Get all pause logs for an item checkin"""
-    pause_logs = await sb_find_many('item_pause_logs', {"item_checkin_id": checkin_id})
-
+    pause_logs = await db.item_pause_logs.find(
+        {"item_checkin_id": checkin_id},
+        {"_id": 0}
+    ).to_list(100)
+    
     for log in pause_logs:
         log["reason_label"] = PAUSE_REASON_LABELS.get(log.get("reason"), log.get("reason"))
-
+    
     total_pause_minutes = sum(p.get("duration_minutes", 0) or 0 for p in pause_logs if p.get("duration_minutes"))
     active_pause = next((p for p in pause_logs if p.get("end_time") is None), None)
-
+    
     return {
         "pauses": pause_logs,
         "total_pause_minutes": total_pause_minutes,

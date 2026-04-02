@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 import uuid
 import logging
 
-from database import supabase, sb_find_one, sb_find_many, sb_insert, sb_update, sb_delete, sb_delete_many, sb_upsert
+from database import db
 from security import get_current_user, require_role
 from models.user import User, UserRole
 
@@ -22,26 +22,26 @@ def compress_base64_image(base64_string: str, max_size_kb: int = 300, max_dimens
     """Compress a base64-encoded image string."""
     if not base64_string:
         return base64_string
-
+    
     try:
         import base64
         from io import BytesIO
         from PIL import Image
-
+        
         # Remove data URL prefix if present
         if ',' in base64_string:
             base64_string = base64_string.split(',')[1]
-
+        
         # Decode base64 to bytes
         image_data = base64.b64decode(base64_string)
         original_size_kb = len(image_data) / 1024
-
+        
         # Skip compression for small images
         if original_size_kb <= max_size_kb:
             return base64_string
-
+        
         img = Image.open(BytesIO(image_data))
-
+        
         # Convert to RGB if necessary
         if img.mode in ('RGBA', 'P', 'LA'):
             background = Image.new('RGB', img.size, (255, 255, 255))
@@ -51,26 +51,26 @@ def compress_base64_image(base64_string: str, max_size_kb: int = 300, max_dimens
             img = background
         elif img.mode != 'RGB':
             img = img.convert('RGB')
-
+        
         # Resize if image is too large
         if img.width > max_dimension or img.height > max_dimension:
             ratio = min(max_dimension / img.width, max_dimension / img.height)
             new_size = (int(img.width * ratio), int(img.height * ratio))
             img = img.resize(new_size, Image.Resampling.LANCZOS)
-
+        
         # Progressive compression
         quality = 85
         output = BytesIO()
-
+        
         while quality >= 20:
             output = BytesIO()
             img.save(output, format='JPEG', quality=quality, optimize=True)
             if len(output.getvalue()) / 1024 <= max_size_kb:
                 break
             quality -= 5
-
+        
         return base64.b64encode(output.getvalue()).decode('utf-8')
-
+        
     except Exception as e:
         logger.error(f"Error compressing image: {e}")
         return base64_string
@@ -78,8 +78,8 @@ def compress_base64_image(base64_string: str, max_size_kb: int = 300, max_dimens
 
 async def detect_product_family(product_names: list) -> tuple:
     """Detects the product family based on product names."""
-    families = await sb_find_many('product_families')
-
+    families = await db.product_families.find({}, {"_id": 0}).to_list(100)
+    
     family_keywords = {
         "adesivos": ["adesivo", "vinil", "adesivos", "plotagem", "recorte"],
         "lonas": ["lona", "banner", "faixa", "frontlight", "backlight"],
@@ -87,27 +87,27 @@ async def detect_product_family(product_names: list) -> tuple:
         "painéis": ["painel", "outdoor", "totem", "display"],
         "outros": []
     }
-
+    
     for name in product_names:
         name_lower = name.lower() if name else ""
-
+        
         for family in families:
             family_name_lower = family.get("name", "").lower()
-
+            
             if family_name_lower in name_lower:
                 return family.get("id"), family.get("name")
-
+            
             keywords = family_keywords.get(family_name_lower, [])
             for keyword in keywords:
                 if keyword in name_lower:
                     return family.get("id"), family.get("name")
-
+    
     if families:
         outros = next((f for f in families if "outro" in f.get("name", "").lower()), None)
         if outros:
             return outros.get("id"), outros.get("name")
         return families[0].get("id"), families[0].get("name")
-
+    
     return None, None
 
 
@@ -131,28 +131,28 @@ async def register_installed_products_from_checkout(
     """Automatically registers installed products based on checkout data."""
     try:
         from models.product import ProductInstalled
-
-        job = await sb_find_one('jobs', {"id": job_id})
+        
+        job = await db.jobs.find_one({"id": job_id}, {"_id": 0})
         if not job:
             return
-
+        
         products = job.get("products_with_area", [])
         if not products:
             products = job.get("holdprint_data", {}).get("products", [])
-
+        
         item_assignments = job.get("item_assignments", [])
         assigned_items = [a for a in item_assignments if a.get("installer_id") == installer_id]
-
+        
         if not assigned_items and installed_m2 and installed_m2 > 0:
             product_name = f"Instalação - {job.get('title', 'Job')}"
             product_names = [p.get("name", "") for p in products]
             family_id, family_name = await detect_product_family(product_names)
-
+            
             productivity_m2_h = None
             if duration_minutes > 0:
                 hours = duration_minutes / 60
                 productivity_m2_h = round(installed_m2 / hours, 2)
-
+            
             installed_product = ProductInstalled(
                 job_id=job_id,
                 checkin_id=checkin_id,
@@ -167,31 +167,31 @@ async def register_installed_products_from_checkout(
                 productivity_m2_h=productivity_m2_h,
                 cause_notes=notes
             )
-
-            await sb_insert('installed_products', installed_product.model_dump())
+            
+            await db.installed_products.insert_one(installed_product.model_dump())
             await update_productivity_history(installed_product)
-
+            
         else:
             total_assigned_items = len(assigned_items)
             time_per_item = duration_minutes // total_assigned_items if total_assigned_items > 0 else duration_minutes
-
+            
             for assignment in assigned_items:
                 item_idx = assignment.get("item_index", 0)
                 item_m2 = assignment.get("m2_assigned", 0)
-
+                
                 product = products[item_idx] if item_idx < len(products) else {}
                 product_name = product.get("name", f"Item {item_idx}")
                 width = product.get("width") or product.get("width_m")
                 height = product.get("height") or product.get("height_m")
-
+                
                 family_id, family_name = await detect_product_family([product_name])
                 final_m2 = item_m2 if item_m2 > 0 else (installed_m2 / total_assigned_items if installed_m2 else 0)
-
+                
                 productivity_m2_h = None
                 if time_per_item > 0 and final_m2 > 0:
                     hours = time_per_item / 60
                     productivity_m2_h = round(final_m2 / hours, 2)
-
+                
                 installed_product = ProductInstalled(
                     job_id=job_id,
                     checkin_id=checkin_id,
@@ -208,10 +208,10 @@ async def register_installed_products_from_checkout(
                     productivity_m2_h=productivity_m2_h,
                     cause_notes=notes
                 )
-
-                await sb_insert('installed_products', installed_product.model_dump())
+                
+                await db.installed_products.insert_one(installed_product.model_dump())
                 await update_productivity_history(installed_product)
-
+                
     except Exception as e:
         logger.error(f"Error registering installed products: {e}")
 
@@ -259,24 +259,24 @@ async def create_checkin(
     current_user: User = Depends(get_current_user)
 ):
     """Create check-in for a job with photo in Base64 and GPS coordinates"""
-    installer = await sb_find_one('installers', {"user_id": current_user.id})
+    installer = await db.installers.find_one({"user_id": current_user.id}, {"_id": 0})
     if not installer:
         raise HTTPException(status_code=400, detail="User is not an installer")
-
-    job = await sb_find_one('jobs', {"id": job_id})
+    
+    job = await db.jobs.find_one({"id": job_id}, {"_id": 0})
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-
-    existing = await sb_find_one('checkins', {
+    
+    existing = await db.checkins.find_one({
         "job_id": job_id,
         "installer_id": installer['id'],
         "status": "in_progress"
     })
     if existing:
         raise HTTPException(status_code=400, detail="Already checked in")
-
+    
     compressed_photo = compress_base64_image(photo_base64, max_size_kb=300, max_dimension=1200)
-
+    
     checkin_id = str(uuid.uuid4())
     checkin = CheckIn(
         id=checkin_id,
@@ -287,16 +287,19 @@ async def create_checkin(
         gps_long=gps_long,
         gps_accuracy=gps_accuracy
     )
-
+    
     checkin_dict = checkin.model_dump()
     checkin_dict['checkin_at'] = checkin_dict['checkin_at'].isoformat()
     if checkin_dict.get('checkout_at'):
         checkin_dict['checkout_at'] = checkin_dict['checkout_at'].isoformat()
-
-    await sb_insert('checkins', checkin_dict)
-
-    await sb_update('jobs', job_id, {"status": "in_progress"})
-
+    
+    await db.checkins.insert_one(checkin_dict)
+    
+    await db.jobs.update_one(
+        {"id": job_id},
+        {"$set": {"status": "in_progress"}}
+    )
+    
     return checkin
 
 
@@ -316,27 +319,27 @@ async def checkout(
     current_user: User = Depends(get_current_user)
 ):
     """Check out from a job with photo in Base64, GPS coordinates and productivity metrics"""
-    checkin_doc = await sb_find_one('checkins', {"id": checkin_id})
+    checkin_doc = await db.checkins.find_one({"id": checkin_id}, {"_id": 0})
     if not checkin_doc:
         raise HTTPException(status_code=404, detail="Check-in not found")
-
+    
     if checkin_doc['status'] == "completed":
         raise HTTPException(status_code=400, detail="Already checked out")
-
+    
     checkout_at = datetime.now(timezone.utc)
     checkin_at = datetime.fromisoformat(checkin_doc['checkin_at']) if isinstance(checkin_doc['checkin_at'], str) else checkin_doc['checkin_at']
-
+    
     # Calculate duration in minutes with decimal precision
     duration_seconds = (checkout_at - checkin_at).total_seconds()
     duration_minutes = round(duration_seconds / 60, 2)  # Keep decimal precision
-
+    
     productivity_m2_h = None
     if installed_m2 and installed_m2 > 0 and duration_minutes > 0:
         hours = duration_minutes / 60
         productivity_m2_h = round(installed_m2 / hours, 2)
-
+    
     compressed_checkout_photo = compress_base64_image(photo_base64, max_size_kb=300, max_dimension=1200)
-
+    
     update_data = {
         "checkout_at": checkout_at.isoformat(),
         "checkout_photo": compressed_checkout_photo,
@@ -353,16 +356,23 @@ async def checkout(
         "duration_minutes": duration_minutes,
         "status": "completed"
     }
-
-    # find_one_and_update equivalent: update then fetch
-    result = await sb_update('checkins', checkin_id, update_data)
-
-    job_checkins = await sb_find_many('checkins', {"job_id": checkin_doc['job_id']})
+    
+    result = await db.checkins.find_one_and_update(
+        {"id": checkin_id},
+        {"$set": update_data},
+        return_document=True,
+        projection={"_id": 0}
+    )
+    
+    job_checkins = await db.checkins.find({"job_id": checkin_doc['job_id']}, {"_id": 0}).to_list(1000)
     all_completed = all(c['status'] == "completed" for c in job_checkins)
-
+    
     if all_completed:
-        await sb_update('jobs', checkin_doc['job_id'], {"status": "completed"})
-
+        await db.jobs.update_one(
+            {"id": checkin_doc['job_id']},
+            {"$set": {"status": "completed"}}
+        )
+    
     await register_installed_products_from_checkout(
         checkin_id=checkin_id,
         job_id=checkin_doc['job_id'],
@@ -374,41 +384,45 @@ async def checkout(
         duration_minutes=duration_minutes,
         notes=notes
     )
-
+    
     if isinstance(result['checkin_at'], str):
         result['checkin_at'] = datetime.fromisoformat(result['checkin_at'])
     if result.get('checkout_at') and isinstance(result['checkout_at'], str):
         result['checkout_at'] = datetime.fromisoformat(result['checkout_at'])
-
+    
     return CheckIn(**result)
 
 
 @router.get("/checkins", response_model=List[CheckIn])
 async def list_checkins(job_id: Optional[str] = None, current_user: User = Depends(get_current_user)):
     """List check-ins - optimized"""
-    filters = {}
-
+    query = {}
+    
     if job_id:
-        filters["job_id"] = job_id
-
+        query["job_id"] = job_id
+    
     if current_user.role == UserRole.INSTALLER:
-        installer = await sb_find_one('installers', {"user_id": current_user.id})
+        installer = await db.installers.find_one({"user_id": current_user.id}, {"_id": 0, "id": 1})
         if installer:
-            filters["installer_id"] = installer['id']
+            query["installer_id"] = installer['id']
         else:
             return []
-
-    checkins = await sb_find_many('checkins', filters if filters else None, order_by='checkin_at', limit=200)
-
-    # Exclude heavy photo fields
+    
+    # Projeção - exclui fotos pesadas da listagem
+    projection = {
+        "_id": 0,
+        "checkin_photo": 0,
+        "checkout_photo": 0
+    }
+    
+    checkins = await db.checkins.find(query, projection).sort("checkin_at", -1).to_list(200)
+    
     for checkin in checkins:
-        checkin.pop('checkin_photo', None)
-        checkin.pop('checkout_photo', None)
         if isinstance(checkin.get('checkin_at'), str):
             checkin['checkin_at'] = datetime.fromisoformat(checkin['checkin_at'])
         if checkin.get('checkout_at') and isinstance(checkin['checkout_at'], str):
             checkin['checkout_at'] = datetime.fromisoformat(checkin['checkout_at'])
-
+    
     return checkins
 
 
@@ -420,21 +434,21 @@ async def get_checkin_details(
     """Get check-in details with photos and GPS data for managers/admins"""
     if current_user.role not in [UserRole.ADMIN, UserRole.MANAGER]:
         raise HTTPException(status_code=403, detail="Insufficient permissions")
-
-    checkin = await sb_find_one('checkins', {"id": checkin_id})
-
+    
+    checkin = await db.checkins.find_one({"id": checkin_id}, {"_id": 0})
+    
     if not checkin:
-        checkin = await sb_find_one('item_checkins', {"id": checkin_id})
-
+        checkin = await db.item_checkins.find_one({"id": checkin_id}, {"_id": 0})
+    
     if not checkin:
         raise HTTPException(status_code=404, detail="Check-in not found")
-
-    installer = await sb_find_one('installers', {"id": checkin.get('installer_id')})
+    
+    installer = await db.installers.find_one({"id": checkin.get('installer_id')}, {"_id": 0})
     if not installer:
-        installer = await sb_find_one('users', {"id": checkin.get('installer_id')})
-
-    job = await sb_find_one('jobs', {"id": checkin.get('job_id')})
-
+        installer = await db.users.find_one({"id": checkin.get('installer_id')}, {"_id": 0, "password_hash": 0})
+    
+    job = await db.jobs.find_one({"id": checkin.get('job_id')}, {"_id": 0})
+    
     return {
         "checkin": checkin,
         "installer": installer or {"full_name": checkin.get('installer_name', 'N/A'), "email": ""},
@@ -449,12 +463,12 @@ async def delete_checkin(
 ):
     """Delete a check-in - Only admin and managers"""
     await require_role(current_user, [UserRole.ADMIN, UserRole.MANAGER])
-
-    checkin = await sb_find_one('checkins', {"id": checkin_id})
+    
+    checkin = await db.checkins.find_one({"id": checkin_id})
     if not checkin:
         raise HTTPException(status_code=404, detail="Check-in not found")
-
-    await sb_delete('checkins', checkin_id)
-    await sb_delete_many('installed_products', {"checkin_id": checkin_id})
-
+    
+    await db.checkins.delete_one({"id": checkin_id})
+    await db.installed_products.delete_many({"checkin_id": checkin_id})
+    
     return {"message": "Check-in deleted successfully"}

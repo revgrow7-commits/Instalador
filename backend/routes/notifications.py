@@ -8,9 +8,8 @@ from datetime import datetime, timezone
 from pydantic import BaseModel
 import logging
 import json
-import asyncio
 
-from database import supabase, sb_find_one, sb_find_many, sb_insert, sb_update, sb_delete, sb_delete_many, sb_upsert
+from database import db
 from security import get_current_user, require_role
 from models.user import User, UserRole
 from config import VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY, VAPID_CLAIMS_EMAIL
@@ -42,12 +41,14 @@ class PushNotificationRequest(BaseModel):
 
 async def send_push_notification(user_id: str, title: str, body: str, url: str = "/", data: dict = None):
     """Send push notification to a specific user."""
-    subscription = await sb_find_one("push_subscriptions", {"user_id": user_id, "is_active": True})
-
+    subscription = await db.push_subscriptions.find_one(
+        {"user_id": user_id, "is_active": True}
+    )
+    
     if not subscription:
         logger.info(f"No active push subscription for user {user_id}")
         return False
-
+    
     try:
         payload = json.dumps({
             "title": title,
@@ -57,7 +58,7 @@ async def send_push_notification(user_id: str, title: str, body: str, url: str =
             "url": url,
             "data": data or {}
         })
-
+        
         webpush(
             subscription_info={
                 "endpoint": subscription["endpoint"],
@@ -75,7 +76,10 @@ async def send_push_notification(user_id: str, title: str, body: str, url: str =
         logger.error(f"Push notification failed for user {user_id}: {str(e)}")
         # If subscription is invalid, mark it as inactive
         if e.response and e.response.status_code in [404, 410]:
-            await sb_update("push_subscriptions", subscription["id"], {"is_active": False})
+            await db.push_subscriptions.update_one(
+                {"user_id": user_id},
+                {"$set": {"is_active": False}}
+            )
         return False
 
 
@@ -94,14 +98,20 @@ async def subscribe_to_notifications(
 ):
     """Subscribe user to push notifications."""
     try:
-        # Upsert subscription in database
-        await sb_upsert("push_subscriptions", {
-            "user_id": current_user.id,
-            "endpoint": subscription.endpoint,
-            "keys": subscription.keys,
-            "subscribed_at": datetime.now(timezone.utc).isoformat(),
-            "is_active": True
-        }, on_conflict="user_id")
+        # Store subscription in database
+        await db.push_subscriptions.update_one(
+            {"user_id": current_user.id},
+            {
+                "$set": {
+                    "user_id": current_user.id,
+                    "endpoint": subscription.endpoint,
+                    "keys": subscription.keys,
+                    "subscribed_at": datetime.now(timezone.utc).isoformat(),
+                    "is_active": True
+                }
+            },
+            upsert=True
+        )
         logger.info(f"Push subscription saved for user {current_user.id}")
         return {"message": "Notificações ativadas com sucesso!"}
     except Exception as e:
@@ -112,16 +122,20 @@ async def subscribe_to_notifications(
 @router.delete("/notifications/unsubscribe")
 async def unsubscribe_from_notifications(current_user: User = Depends(get_current_user)):
     """Unsubscribe user from push notifications."""
-    existing = await sb_find_one("push_subscriptions", {"user_id": current_user.id})
-    if existing:
-        await sb_update("push_subscriptions", existing["id"], {"is_active": False})
+    await db.push_subscriptions.update_one(
+        {"user_id": current_user.id},
+        {"$set": {"is_active": False}}
+    )
     return {"message": "Notificações desativadas"}
 
 
 @router.get("/notifications/status")
 async def get_notification_status(current_user: User = Depends(get_current_user)):
     """Check if user is subscribed to notifications."""
-    subscription = await sb_find_one("push_subscriptions", {"user_id": current_user.id, "is_active": True})
+    subscription = await db.push_subscriptions.find_one(
+        {"user_id": current_user.id, "is_active": True},
+        {"_id": 0}
+    )
     return {"subscribed": subscription is not None}
 
 
@@ -134,18 +148,15 @@ async def send_notification_to_users(
 ):
     """Send push notification to specific users or all installers (admin/manager only)."""
     await require_role(current_user, [UserRole.ADMIN, UserRole.MANAGER])
-
+    
     if notification.user_ids:
         # Send to specific users
         user_ids = notification.user_ids
     else:
         # Send to all installers
-        installers = await asyncio.to_thread(
-            lambda: supabase.table("installers").select("user_id").execute()
-        )
-        installers_data = installers.data if installers and installers.data else []
-        user_ids = [i["user_id"] for i in installers_data if i.get("user_id")]
-
+        installers = await db.installers.find({}, {"_id": 0, "user_id": 1}).to_list(1000)
+        user_ids = [i["user_id"] for i in installers if i.get("user_id")]
+    
     sent_count = 0
     for user_id in user_ids:
         success = await send_push_notification(
@@ -156,7 +167,7 @@ async def send_notification_to_users(
         )
         if success:
             sent_count += 1
-
+    
     return {"message": f"Notificações enviadas para {sent_count} usuários"}
 
 
@@ -175,24 +186,20 @@ async def check_schedule_conflicts(
         # Parse date
         target_date = datetime.fromisoformat(date.replace('Z', '+00:00'))
         target_date_str = target_date.strftime('%Y-%m-%d')
-
-        # Find jobs assigned to this installer on the same date using supabase directly
-        # because we need array contains + regex-like date prefix filter
-        jobs_resp = await asyncio.to_thread(
-            lambda: supabase.table("jobs")
-                .select("id,title,scheduled_date")
-                .contains("assigned_installers", [installer_id])
-                .like("scheduled_date", f"{target_date_str}%")
-                .execute()
-        )
-        conflicting_jobs = jobs_resp.data if jobs_resp and jobs_resp.data else []
-
-        # Exclude specific job if provided
+        
+        # Find jobs assigned to this installer on the same date
+        query = {
+            "assigned_installers": installer_id,
+            "scheduled_date": {"$regex": f"^{target_date_str}"}
+        }
+        
         if exclude_job_id:
-            conflicting_jobs = [j for j in conflicting_jobs if j.get("id") != exclude_job_id]
-
+            query["id"] = {"$ne": exclude_job_id}
+        
+        conflicting_jobs = await db.jobs.find(query, {"_id": 0, "id": 1, "title": 1, "scheduled_date": 1}).to_list(100)
+        
         has_conflict = len(conflicting_jobs) > 0
-
+        
         return {
             "has_conflict": has_conflict,
             "conflicting_jobs": conflicting_jobs,
@@ -209,20 +216,16 @@ async def check_schedule_conflicts(
 async def get_pending_checkins(current_user: User = Depends(get_current_user)):
     """Get scheduled jobs that haven't been started (for late check-in alerts)."""
     await require_role(current_user, [UserRole.ADMIN, UserRole.MANAGER])
-
+    
     now = datetime.now(timezone.utc)
     today_str = now.strftime('%Y-%m-%d')
-
-    # Find jobs scheduled for today with status scheduled
-    jobs_resp = await asyncio.to_thread(
-        lambda: supabase.table("jobs")
-            .select("*")
-            .eq("status", "scheduled")
-            .like("scheduled_date", f"{today_str}%")
-            .execute()
-    )
-    jobs = jobs_resp.data if jobs_resp and jobs_resp.data else []
-
+    
+    # Find jobs scheduled for today that are past their scheduled time
+    jobs = await db.jobs.find({
+        "status": "scheduled",
+        "scheduled_date": {"$regex": f"^{today_str}"}
+    }, {"_id": 0}).to_list(1000)
+    
     pending = []
     for job in jobs:
         scheduled_date_str = job.get("scheduled_date", "")
@@ -234,21 +237,19 @@ async def get_pending_checkins(current_user: User = Depends(get_current_user)):
                     minutes_late = int((now - scheduled_time).total_seconds() / 60)
                     job["minutes_late"] = minutes_late
                     job["is_late"] = True
-
+                    
                     # Get assigned installers info
                     if job.get("assigned_installers"):
-                        installers_resp = await asyncio.to_thread(
-                            lambda ids=job["assigned_installers"]: supabase.table("installers")
-                                .select("id,full_name,user_id")
-                                .in_("id", ids)
-                                .execute()
-                        )
-                        job["installers_info"] = installers_resp.data if installers_resp and installers_resp.data else []
-
+                        installers = await db.installers.find(
+                            {"id": {"$in": job["assigned_installers"]}},
+                            {"_id": 0, "id": 1, "full_name": 1, "user_id": 1}
+                        ).to_list(100)
+                        job["installers_info"] = installers
+                    
                     pending.append(job)
             except (ValueError, TypeError):
                 pass
-
+    
     return {"pending_checkins": pending, "count": len(pending)}
 
 
@@ -256,10 +257,10 @@ async def get_pending_checkins(current_user: User = Depends(get_current_user)):
 async def send_late_checkin_alerts(current_user: User = Depends(get_current_user)):
     """Send notifications for late check-ins."""
     await require_role(current_user, [UserRole.ADMIN, UserRole.MANAGER])
-
+    
     result = await get_pending_checkins(current_user)
     pending = result["pending_checkins"]
-
+    
     sent_count = 0
     for job in pending:
         installers_info = job.get("installers_info", [])
@@ -275,7 +276,7 @@ async def send_late_checkin_alerts(current_user: User = Depends(get_current_user
                 )
                 if success:
                     sent_count += 1
-
+    
     return {"message": f"Alertas enviados para {sent_count} instaladores", "jobs_count": len(pending)}
 
 
@@ -286,24 +287,21 @@ async def notify_job_scheduled(
 ):
     """Send notification when a job is scheduled."""
     await require_role(current_user, [UserRole.ADMIN, UserRole.MANAGER])
-
-    job = await sb_find_one("jobs", {"id": job_id})
+    
+    job = await db.jobs.find_one({"id": job_id}, {"_id": 0})
     if not job:
         raise HTTPException(status_code=404, detail="Job não encontrado")
-
+    
     assigned_installers = job.get("assigned_installers", [])
     if not assigned_installers:
         return {"message": "Job não tem instaladores atribuídos", "sent_count": 0}
-
+    
     # Get installer user IDs
-    installers_resp = await asyncio.to_thread(
-        lambda: supabase.table("installers")
-            .select("user_id,full_name")
-            .in_("id", assigned_installers)
-            .execute()
-    )
-    installers = installers_resp.data if installers_resp and installers_resp.data else []
-
+    installers = await db.installers.find(
+        {"id": {"$in": assigned_installers}},
+        {"_id": 0, "user_id": 1, "full_name": 1}
+    ).to_list(100)
+    
     scheduled_date = job.get("scheduled_date", "")
     date_display = ""
     if scheduled_date:
@@ -312,7 +310,7 @@ async def notify_job_scheduled(
             date_display = dt.strftime("%d/%m/%Y às %H:%M")
         except (ValueError, TypeError):
             date_display = scheduled_date
-
+    
     sent_count = 0
     for installer in installers:
         user_id = installer.get("user_id")
@@ -326,5 +324,5 @@ async def notify_job_scheduled(
             )
             if success:
                 sent_count += 1
-
+    
     return {"message": f"Notificações enviadas para {sent_count} instaladores"}

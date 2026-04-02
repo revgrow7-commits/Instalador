@@ -1,0 +1,4 @@
+# Supabase local development
+.env
+.env.local
+.env.*.local

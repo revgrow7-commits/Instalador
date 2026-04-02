@@ -9,9 +9,8 @@ from datetime import datetime, timezone
 from io import BytesIO
 import logging
 import re
-import asyncio
 
-from database import supabase, sb_find_one, sb_find_many, sb_insert, sb_update, sb_delete, sb_delete_many, sb_upsert, sb_count
+from database import db
 from security import get_current_user, require_role
 from models.user import User, UserRole
 
@@ -32,9 +31,9 @@ def classify_product_to_family(product_name: str) -> tuple:
     """
     if not product_name:
         return "Outros", 0
-
+    
     name = product_name.lower()
-
+    
     classifications = [
         (["adesivo", "vinil", "plotagem", "recorte", "adesivos"], "Adesivos", 90),
         (["lona", "banner", "faixa", "frontlight", "backlight"], "Lonas/Banners", 90),
@@ -44,12 +43,12 @@ def classify_product_to_family(product_name: str) -> tuple:
         (["serviço", "instalação", "entrega", "mão de obra"], "Serviços", 70),
         (["impressão", "impresso", "papel"], "Impressos", 75),
     ]
-
+    
     for keywords, family, confidence in classifications:
         for keyword in keywords:
             if keyword in name:
                 return family, confidence
-
+    
     return "Outros", 30
 
 
@@ -62,32 +61,32 @@ def calculate_job_products_area(holdprint_data: dict) -> tuple:
     total_area_m2 = 0
     total_products = 0
     total_quantity = 0
-
+    
     products = holdprint_data.get("products", [])
-
+    
     for product in products:
         product_name = product.get("name", "")
         quantity = product.get("quantity", 1)
         description = product.get("description", "")
-
+        
         width_m = None
         height_m = None
-
+        
         width_match = re.search(r'Largura:\s*<span[^>]*>([0-9.,]+)\s*m', description, re.IGNORECASE)
         height_match = re.search(r'Altura:\s*<span[^>]*>([0-9.,]+)\s*m', description, re.IGNORECASE)
-
+        
         if width_match:
             width_m = float(width_match.group(1).replace(',', '.'))
         if height_match:
             height_m = float(height_match.group(1).replace(',', '.'))
-
+        
         area_m2 = None
         if width_m and height_m:
             area_m2 = round(width_m * height_m * quantity, 2)
             total_area_m2 += area_m2
-
+        
         family_name, confidence = classify_product_to_family(product_name)
-
+        
         products_with_area.append({
             "name": product_name,
             "quantity": quantity,
@@ -99,10 +98,10 @@ def calculate_job_products_area(holdprint_data: dict) -> tuple:
             "unit_price": product.get("unitPrice", 0),
             "total_value": product.get("totalValue", 0)
         })
-
+        
         total_products += 1
         total_quantity += quantity
-
+    
     return products_with_area, round(total_area_m2, 2), total_products, total_quantity
 
 
@@ -115,42 +114,42 @@ async def get_report_by_family(current_user: User = Depends(get_current_user)):
     Analisa todos os jobs importados e classifica seus produtos por família.
     """
     await require_role(current_user, [UserRole.ADMIN, UserRole.MANAGER])
-
-    jobs = await sb_find_many("jobs", limit=10000)
-    families = await sb_find_many("product_families", limit=100)
+    
+    jobs = await db.jobs.find({}, {"_id": 0}).to_list(10000)
+    families = await db.product_families.find({}, {"_id": 0}).to_list(100)
     family_map = {f["name"]: f for f in families}
-
+    
     family_report = {}
     all_products = []
     unclassified_products = []
-
+    
     for job in jobs:
         holdprint_data = job.get("holdprint_data", {})
         products = holdprint_data.get("products", [])
         production_items = holdprint_data.get("production", {}).get("items", [])
-
+        
         for product in products:
             product_name = product.get("name", "")
             quantity = product.get("quantity", 1)
             description = product.get("description", "")
-
+            
             width_m = None
             height_m = None
-
+            
             width_match = re.search(r'Largura:\s*<span[^>]*>([0-9.,]+)\s*m', description, re.IGNORECASE)
             height_match = re.search(r'Altura:\s*<span[^>]*>([0-9.,]+)\s*m', description, re.IGNORECASE)
-
+            
             if width_match:
                 width_m = float(width_match.group(1).replace(',', '.'))
             if height_match:
                 height_m = float(height_match.group(1).replace(',', '.'))
-
+            
             area_m2 = None
             if width_m and height_m:
                 area_m2 = round(width_m * height_m * quantity, 2)
-
+            
             family_name, confidence = classify_product_to_family(product_name)
-
+            
             product_data = {
                 "job_id": job.get("id"),
                 "job_title": job.get("title"),
@@ -167,9 +166,9 @@ async def get_report_by_family(current_user: User = Depends(get_current_user)):
                 "total_value": product.get("totalValue", 0),
                 "branch": job.get("branch")
             }
-
+            
             all_products.append(product_data)
-
+            
             if family_name not in family_report:
                 family_info = family_map.get(family_name, {})
                 family_report[family_name] = {
@@ -182,7 +181,7 @@ async def get_report_by_family(current_user: User = Depends(get_current_user)):
                     "total_value": 0,
                     "products": []
                 }
-
+            
             family_report[family_name]["total_jobs"].add(job.get("id"))
             family_report[family_name]["total_products"] += 1
             family_report[family_name]["total_quantity"] += quantity
@@ -190,16 +189,16 @@ async def get_report_by_family(current_user: User = Depends(get_current_user)):
                 family_report[family_name]["total_area_m2"] += area_m2
             family_report[family_name]["total_value"] += product.get("totalValue", 0)
             family_report[family_name]["products"].append(product_data)
-
+            
             if confidence < 50:
                 unclassified_products.append(product_data)
-
+        
         for item in production_items:
             item_name = item.get("name", "")
             item_quantity = item.get("quantity", 1)
-
+            
             family_name, confidence = classify_product_to_family(item_name)
-
+            
             if family_name not in family_report:
                 family_info = family_map.get(family_name, {})
                 family_report[family_name] = {
@@ -212,22 +211,22 @@ async def get_report_by_family(current_user: User = Depends(get_current_user)):
                     "total_value": 0,
                     "products": []
                 }
-
+            
             family_report[family_name]["total_jobs"].add(job.get("id"))
             family_report[family_name]["total_quantity"] += item_quantity
-
+    
     for family_name in family_report:
         family_report[family_name]["total_jobs"] = len(family_report[family_name]["total_jobs"])
         family_report[family_name]["total_area_m2"] = round(family_report[family_name]["total_area_m2"], 2)
         family_report[family_name]["total_value"] = round(family_report[family_name]["total_value"], 2)
         family_report[family_name]["products"] = family_report[family_name]["products"][:50]
-
+    
     sorted_families = sorted(family_report.values(), key=lambda x: x["total_quantity"], reverse=True)
-
+    
     total_area = sum(f["total_area_m2"] for f in sorted_families)
     total_value = sum(f["total_value"] for f in sorted_families)
     total_products = sum(f["total_products"] for f in sorted_families)
-
+    
     return {
         "summary": {
             "total_jobs": len(jobs),
@@ -253,27 +252,32 @@ async def get_family_productivity_kpis(
     KPIs de produtividade por família de produto.
     """
     await require_role(current_user, [UserRole.ADMIN, UserRole.MANAGER])
-
-    # Build query for item_checkins with date range
-    checkins_resp = await asyncio.to_thread(
-        lambda: _build_checkins_query(date_from, date_to)
-    )
-    checkins = checkins_resp.data if checkins_resp and checkins_resp.data else []
-
-    jobs = await sb_find_many("jobs", limit=10000)
+    
+    query = {"status": "completed"}
+    if date_from or date_to:
+        date_filter = {}
+        if date_from:
+            date_filter["$gte"] = date_from + "T00:00:00"
+        if date_to:
+            date_filter["$lte"] = date_to + "T23:59:59"
+        if date_filter:
+            query["checkin_at"] = date_filter
+    
+    checkins = await db.item_checkins.find(query, {"_id": 0}).to_list(10000)
+    jobs = await db.jobs.find({}, {"_id": 0}).to_list(10000)
     jobs_map = {j["id"]: j for j in jobs}
-
+    
     family_data = {}
     global_totals = {"total_m2": 0, "total_minutes": 0, "count": 0}
-
+    
     for checkin in checkins:
         family = checkin.get("family_name") or "Outros"
         installed_m2 = checkin.get("installed_m2", 0) or 0
         duration = checkin.get("net_duration_minutes") or checkin.get("duration_minutes", 0) or 0
-
+        
         if installed_m2 <= 0:
             continue
-
+            
         if family not in family_data:
             family_data[family] = {
                 "family_name": family,
@@ -287,42 +291,42 @@ async def get_family_productivity_kpis(
                 "installers": set(),
                 "jobs": set()
             }
-
+        
         family_data[family]["total_m2"] += installed_m2
         family_data[family]["total_minutes"] += duration
         family_data[family]["count"] += 1
         family_data[family]["m2_list"].append(installed_m2)
         family_data[family]["duration_list"].append(duration)
-
+        
         if duration > 0:
             family_data[family]["min_duration"] = min(family_data[family]["min_duration"], duration)
             family_data[family]["max_duration"] = max(family_data[family]["max_duration"], duration)
-
+        
         if checkin.get("installer_id"):
             family_data[family]["installers"].add(checkin.get("installer_id"))
         if checkin.get("job_id"):
             family_data[family]["jobs"].add(checkin.get("job_id"))
-
+        
         global_totals["total_m2"] += installed_m2
         global_totals["total_minutes"] += duration
         global_totals["count"] += 1
-
+    
     result = []
     global_avg_m2_h = (global_totals["total_m2"] / global_totals["total_minutes"] * 60) if global_totals["total_minutes"] > 0 else 0
-
+    
     for family, data in family_data.items():
         avg_m2_per_hour = (data["total_m2"] / data["total_minutes"] * 60) if data["total_minutes"] > 0 else 0
         avg_m2_per_install = data["total_m2"] / data["count"] if data["count"] > 0 else 0
         avg_duration = data["total_minutes"] / data["count"] if data["count"] > 0 else 0
         efficiency = (avg_m2_per_hour / global_avg_m2_h * 100) if global_avg_m2_h > 0 else 100
-
+        
         if len(data["m2_list"]) > 1:
             mean_m2 = sum(data["m2_list"]) / len(data["m2_list"])
             variance = sum((x - mean_m2) ** 2 for x in data["m2_list"]) / len(data["m2_list"])
             std_dev_m2 = variance ** 0.5
         else:
             std_dev_m2 = 0
-
+        
         result.append({
             "family_name": family,
             "total_m2": round(data["total_m2"], 2),
@@ -339,12 +343,12 @@ async def get_family_productivity_kpis(
             "unique_jobs": len(data["jobs"]),
             "share_of_total_m2": round(data["total_m2"] / global_totals["total_m2"] * 100, 1) if global_totals["total_m2"] > 0 else 0
         })
-
+    
     result.sort(key=lambda x: x["total_m2"], reverse=True)
-
+    
     for i, item in enumerate(result, 1):
         item["rank"] = i
-
+    
     return {
         "kpis": result,
         "summary": {
@@ -358,45 +362,32 @@ async def get_family_productivity_kpis(
     }
 
 
-def _build_checkins_query(date_from, date_to):
-    """Helper to build checkins query with optional date range filters."""
-    q = supabase.table("item_checkins").select("*").eq("status", "completed")
-    if date_from:
-        q = q.gte("checkin_at", date_from + "T00:00:00")
-    if date_to:
-        q = q.lte("checkin_at", date_to + "T23:59:59")
-    return q.limit(10000).execute()
-
-
 @router.get("/reports/by-installer")
 async def get_report_by_installer(current_user: User = Depends(get_current_user)):
     """
     Relatório de produtividade por instalador.
     """
     await require_role(current_user, [UserRole.ADMIN, UserRole.MANAGER])
-
-    installers = await sb_find_many("installers", limit=1000)
-    item_checkins_resp = await asyncio.to_thread(
-        lambda: supabase.table("item_checkins").select("*").eq("status", "completed").limit(10000).execute()
-    )
-    item_checkins = item_checkins_resp.data if item_checkins_resp and item_checkins_resp.data else []
-    jobs = await sb_find_many("jobs", limit=10000)
-
+    
+    installers = await db.installers.find({}, {"_id": 0}).to_list(1000)
+    item_checkins = await db.item_checkins.find({"status": "completed"}, {"_id": 0}).to_list(10000)
+    jobs = await db.jobs.find({}, {"_id": 0}).to_list(10000)
+    
     jobs_map = {job["id"]: job for job in jobs}
     installer_report = []
-
+    
     for installer in installers:
         installer_id = installer["id"]
         installer_checkins = [c for c in item_checkins if c.get("installer_id") == installer_id]
-
+        
         completed_count = len(installer_checkins)
         total_net_duration_min = 0
         total_m2_installed = 0
-
+        
         for checkin in installer_checkins:
             net_minutes = checkin.get("net_duration_minutes") or checkin.get("duration_minutes") or 0
             total_net_duration_min += net_minutes
-
+            
             job = jobs_map.get(checkin.get("job_id"))
             if job:
                 products = job.get("products_with_area", [])
@@ -405,10 +396,10 @@ async def get_report_by_installer(current_user: User = Depends(get_current_user)
                     item = products[item_index]
                     item_m2 = item.get("total_area_m2", 0) or 0
                     total_m2_installed += item_m2
-
+        
         job_ids = set(c.get("job_id") for c in installer_checkins if c.get("job_id"))
         jobs_worked = len(job_ids)
-
+        
         jobs_details = []
         for job_id in job_ids:
             job = jobs_map.get(job_id)
@@ -416,14 +407,14 @@ async def get_report_by_installer(current_user: User = Depends(get_current_user)
                 job_area = job.get("area_m2", 0) or 0
                 job_item_checkins = [c for c in installer_checkins if c.get("job_id") == job_id]
                 job_net_duration = sum(c.get("net_duration_minutes") or c.get("duration_minutes") or 0 for c in job_item_checkins)
-
+                
                 job_m2_installed = 0
                 products = job.get("products_with_area", [])
                 for checkin in job_item_checkins:
                     item_index = checkin.get("item_index", 0)
                     if item_index < len(products):
                         job_m2_installed += products[item_index].get("total_area_m2", 0) or 0
-
+                
                 jobs_details.append({
                     "job_id": job_id,
                     "job_title": job.get("title"),
@@ -434,12 +425,12 @@ async def get_report_by_installer(current_user: User = Depends(get_current_user)
                     "status": job.get("status"),
                     "items_completed": len(job_item_checkins)
                 })
-
+        
         productivity_m2_h = 0
         total_hours = total_net_duration_min / 60 if total_net_duration_min > 0 else 0
         if total_hours > 0 and total_m2_installed > 0:
             productivity_m2_h = round(total_m2_installed / total_hours, 2)
-
+        
         installer_data = {
             "installer_id": installer_id,
             "full_name": installer.get("full_name"),
@@ -454,14 +445,14 @@ async def get_report_by_installer(current_user: User = Depends(get_current_user)
             },
             "jobs": sorted(jobs_details, key=lambda x: x.get("m2_installed", 0), reverse=True)[:20]
         }
-
+        
         installer_report.append(installer_data)
-
+    
     installer_report.sort(key=lambda x: x["metrics"]["productivity_m2_h"], reverse=True)
-
+    
     total_area_all = sum(i["metrics"]["total_m2_reported"] for i in installer_report)
     total_hours_all = sum(i["metrics"]["total_duration_hours"] for i in installer_report)
-
+    
     return {
         "summary": {
             "total_installers": len(installer_report),
@@ -485,76 +476,70 @@ async def get_productivity_report(
     Relatório de produtividade completo.
     """
     await require_role(current_user, [UserRole.ADMIN, UserRole.MANAGER])
-
-    jobs = await sb_find_many("jobs", limit=10000)
-    item_checkins_resp = await asyncio.to_thread(
-        lambda: supabase.table("item_checkins").select("*").eq("status", "completed").limit(10000).execute()
-    )
-    item_checkins = item_checkins_resp.data if item_checkins_resp and item_checkins_resp.data else []
-    installers = await sb_find_many("installers", limit=1000)
-    legacy_checkins_resp = await asyncio.to_thread(
-        lambda: supabase.table("checkins").select("*").eq("status", "completed").limit(10000).execute()
-    )
-    legacy_checkins = legacy_checkins_resp.data if legacy_checkins_resp and legacy_checkins_resp.data else []
-
+    
+    jobs = await db.jobs.find({}, {"_id": 0}).to_list(10000)
+    item_checkins = await db.item_checkins.find({"status": "completed"}, {"_id": 0}).to_list(10000)
+    installers = await db.installers.find({}, {"_id": 0}).to_list(1000)
+    legacy_checkins = await db.checkins.find({"status": "completed"}, {"_id": 0}).to_list(10000)
+    
     jobs_map = {job["id"]: job for job in jobs}
     installers_map = {inst["id"]: inst for inst in installers}
-
+    
     by_installer = {}
     by_job = {}
     by_family = {}
     by_item = {}
-
+    
     for checkin in item_checkins:
         job = jobs_map.get(checkin.get("job_id"))
         if not job:
             continue
-
+        
         checkin_at = checkin.get("checkin_at")
         if isinstance(checkin_at, str):
             checkin_at = datetime.fromisoformat(checkin_at.replace('Z', '+00:00'))
-
+        
         if date_from:
             start_date = datetime.fromisoformat(date_from + "T00:00:00+00:00")
             if checkin_at and checkin_at < start_date:
                 continue
-
+        
         if date_to:
             end_date = datetime.fromisoformat(date_to + "T23:59:59+00:00")
             if checkin_at and checkin_at > end_date:
                 continue
-
+        
         products = job.get("products_with_area", [])
         item_index = checkin.get("item_index", 0)
         item = products[item_index] if item_index < len(products) else {}
-
+        
         item_m2 = item.get("total_area_m2", 0) or 0
-
+        
         checkout_at = checkin.get("checkout_at")
         if isinstance(checkout_at, str):
             checkout_at = datetime.fromisoformat(checkout_at.replace('Z', '+00:00'))
-
+        
         if checkin_at and checkin_at.tzinfo is None:
             checkin_at = checkin_at.replace(tzinfo=timezone.utc)
         if checkout_at and checkout_at.tzinfo is None:
             checkout_at = checkout_at.replace(tzinfo=timezone.utc)
-
+        
         net_duration_minutes = checkin.get("net_duration_minutes")
         total_pause_minutes = checkin.get("total_pause_minutes", 0) or 0
-
+        
         if net_duration_minutes is None:
             if checkin_at and checkout_at:
                 net_duration_minutes = (checkout_at - checkin_at).total_seconds() / 60
             else:
                 net_duration_minutes = 0
-
+        
         duration_minutes = net_duration_minutes
-
+        
         installer_id = checkin.get("installer_id")
         installer = installers_map.get(installer_id, {})
         installer_name = installer.get("full_name", "Desconhecido")
         family_name = item.get("family_name", "Não Classificado")
-
+        
         record = {
             "job_id": job.get("id"),
             "job_title": job.get("title"),
@@ -575,14 +560,14 @@ async def get_productivity_report(
             "scenario_category": checkin.get("scenario_category"),
             "notes": checkin.get("notes")
         }
-
+        
         if filter_by == "installer" and filter_id and installer_id != filter_id:
             continue
         if filter_by == "job" and filter_id and job.get("id") != filter_id:
             continue
         if filter_by == "family" and filter_id and family_name != filter_id:
             continue
-
+        
         # Aggregate by installer
         if installer_id not in by_installer:
             by_installer[installer_id] = {
@@ -600,7 +585,7 @@ async def get_productivity_report(
         by_installer[installer_id]["items_count"] += 1
         by_installer[installer_id]["jobs"].add(job.get("id"))
         by_installer[installer_id]["records"].append(record)
-
+        
         # Aggregate by job
         job_id = job.get("id")
         if job_id not in by_job:
@@ -620,7 +605,7 @@ async def get_productivity_report(
         by_job[job_id]["items_count"] += 1
         by_job[job_id]["installers"].add(installer_id)
         by_job[job_id]["records"].append(record)
-
+        
         # Aggregate by family
         if family_name not in by_family:
             by_family[family_name] = {
@@ -638,7 +623,7 @@ async def get_productivity_report(
         by_family[family_name]["jobs"].add(job.get("id"))
         by_family[family_name]["installers"].add(installer_id)
         by_family[family_name]["records"].append(record)
-
+        
         # Aggregate by item
         item_key = f"{job_id}:{item_index}"
         if item_key not in by_item:
@@ -658,37 +643,37 @@ async def get_productivity_report(
         by_item[item_key]["executions"] += 1
         by_item[item_key]["installers"].add(installer_id)
         by_item[item_key]["records"].append(record)
-
+    
     # Process legacy checkins
     for checkin in legacy_checkins:
         job = jobs_map.get(checkin.get("job_id"))
         if not job:
             continue
-
+        
         checkin_at = checkin.get("checkin_at")
         if isinstance(checkin_at, str):
             checkin_at = datetime.fromisoformat(checkin_at.replace('Z', '+00:00'))
-
+        
         if date_from:
             start_date = datetime.fromisoformat(date_from + "T00:00:00+00:00")
             if checkin_at and checkin_at < start_date:
                 continue
-
+        
         if date_to:
             end_date = datetime.fromisoformat(date_to + "T23:59:59+00:00")
             if checkin_at and checkin_at > end_date:
                 continue
-
+        
         duration_minutes = checkin.get("duration_minutes", 0) or 0
         installer_id = checkin.get("installer_id")
         installer = installers_map.get(installer_id, {})
         installer_name = installer.get("full_name", "Desconhecido")
-
+        
         if filter_by == "installer" and filter_id and installer_id != filter_id:
             continue
         if filter_by == "job" and filter_id and job.get("id") != filter_id:
             continue
-
+        
         if installer_id not in by_installer:
             by_installer[installer_id] = {
                 "installer_id": installer_id,
@@ -704,13 +689,13 @@ async def get_productivity_report(
         by_installer[installer_id]["total_minutes"] += duration_minutes
         by_installer[installer_id]["items_count"] += 1
         by_installer[installer_id]["jobs"].add(job.get("id"))
-
+    
     def calc_productivity(total_m2, total_minutes):
         if total_minutes > 0 and total_m2 > 0:
             hours = total_minutes / 60
             return round(total_m2 / hours, 2)
         return 0
-
+    
     # Prepare installer results
     installer_results = []
     for data in by_installer.values():
@@ -722,9 +707,9 @@ async def get_productivity_report(
         data["total_m2"] = round(data["total_m2"], 2)
         data["records"] = data["records"][:50]
         installer_results.append(data)
-
+    
     installer_results.sort(key=lambda x: x["productivity_m2_h"], reverse=True)
-
+    
     # Prepare job results
     job_results = []
     for data in by_job.values():
@@ -736,9 +721,9 @@ async def get_productivity_report(
         data["total_m2_executed"] = round(data["total_m2_executed"], 2)
         data["records"] = data["records"][:50]
         job_results.append(data)
-
+    
     job_results.sort(key=lambda x: x["total_m2_executed"], reverse=True)
-
+    
     # Prepare family results
     family_results = []
     for data in by_family.values():
@@ -752,9 +737,9 @@ async def get_productivity_report(
         data["total_m2"] = round(data["total_m2"], 2)
         data["records"] = data["records"][:50]
         family_results.append(data)
-
+    
     family_results.sort(key=lambda x: x["total_m2"], reverse=True)
-
+    
     # Prepare item results
     item_results = []
     for data in by_item.values():
@@ -765,13 +750,13 @@ async def get_productivity_report(
         data["total_hours"] = round(data["total_minutes"] / 60, 2)
         data["records"] = data["records"][:20]
         item_results.append(data)
-
+    
     item_results.sort(key=lambda x: x["m2_api"], reverse=True)
-
+    
     total_m2 = sum(i["total_m2"] for i in installer_results)
     total_minutes = sum(i["total_minutes"] for i in by_installer.values())
     total_hours = round(total_minutes / 60, 2)
-
+    
     return {
         "summary": {
             "total_m2": round(total_m2, 2),
@@ -797,45 +782,50 @@ async def get_productivity_report(
 
 @router.get("/metrics")
 async def get_metrics(current_user: User = Depends(get_current_user)):
-    """Get general metrics for dashboard."""
+    """Get general metrics for dashboard - optimized with aggregation."""
     await require_role(current_user, [UserRole.ADMIN, UserRole.MANAGER])
-
-    # Count jobs by status
-    jobs_resp = await asyncio.to_thread(
-        lambda: supabase.table("jobs").select("id,status,archived").neq("archived", True).execute()
-    )
-    jobs_data_raw = jobs_resp.data if jobs_resp and jobs_resp.data else []
-
-    total_jobs = len(jobs_data_raw)
-    completed_jobs = sum(1 for j in jobs_data_raw if j.get("status") in ["completed", "finalizado"])
-    in_progress_jobs = sum(1 for j in jobs_data_raw if j.get("status") in ["in_progress", "instalando"])
-    pending_jobs = sum(1 for j in jobs_data_raw if j.get("status") in ["pending", "aguardando", "scheduled", "agendado"])
-
-    # Count checkins
-    checkins_resp = await asyncio.to_thread(
-        lambda: supabase.table("checkins").select("id,status,duration_minutes").execute()
-    )
-    item_checkins_resp = await asyncio.to_thread(
-        lambda: supabase.table("item_checkins").select("id,status,duration_minutes").execute()
-    )
-    c_data = checkins_resp.data if checkins_resp and checkins_resp.data else []
-    ic_data = item_checkins_resp.data if item_checkins_resp and item_checkins_resp.data else []
-
-    total_checkins = len(c_data) + len(ic_data)
-    completed_checkins = sum(1 for c in c_data if c.get("status") == "completed") + \
-                         sum(1 for c in ic_data if c.get("status") == "completed")
-
-    all_durations = [c.get("duration_minutes", 0) or 0 for c in c_data] + \
-                    [c.get("duration_minutes", 0) or 0 for c in ic_data]
-    avg_duration = sum(all_durations) / len(all_durations) if all_durations else 0
-
-    total_installers = await sb_count("installers")
-
+    
+    # Agregação única para jobs
+    jobs_pipeline = [
+        {"$match": {"archived": {"$ne": True}}},
+        {"$group": {
+            "_id": None,
+            "total": {"$sum": 1},
+            "completed": {"$sum": {"$cond": [{"$in": ["$status", ["completed", "finalizado"]]}, 1, 0]}},
+            "in_progress": {"$sum": {"$cond": [{"$in": ["$status", ["in_progress", "instalando"]]}, 1, 0]}},
+            "pending": {"$sum": {"$cond": [{"$in": ["$status", ["pending", "aguardando", "scheduled", "agendado"]]}, 1, 0]}}
+        }}
+    ]
+    jobs_stats = await db.jobs.aggregate(jobs_pipeline).to_list(1)
+    jobs_data = jobs_stats[0] if jobs_stats else {"total": 0, "completed": 0, "in_progress": 0, "pending": 0}
+    
+    # Agregação para checkins com avg
+    checkins_pipeline = [
+        {"$group": {
+            "_id": None,
+            "total": {"$sum": 1},
+            "completed": {"$sum": {"$cond": [{"$eq": ["$status", "completed"]}, 1, 0]}},
+            "avg_duration": {"$avg": {"$ifNull": ["$duration_minutes", 0]}}
+        }}
+    ]
+    
+    checkins_stats = await db.checkins.aggregate(checkins_pipeline).to_list(1)
+    item_checkins_stats = await db.item_checkins.aggregate(checkins_pipeline).to_list(1)
+    
+    c_data = checkins_stats[0] if checkins_stats else {"total": 0, "completed": 0, "avg_duration": 0}
+    ic_data = item_checkins_stats[0] if item_checkins_stats else {"total": 0, "completed": 0, "avg_duration": 0}
+    
+    total_checkins = c_data["total"] + ic_data["total"]
+    completed_checkins = c_data["completed"] + ic_data["completed"]
+    avg_duration = (c_data["avg_duration"] + ic_data["avg_duration"]) / 2 if total_checkins > 0 else 0
+    
+    total_installers = await db.installers.count_documents({})
+    
     return {
-        "total_jobs": total_jobs,
-        "completed_jobs": completed_jobs,
-        "in_progress_jobs": in_progress_jobs,
-        "pending_jobs": pending_jobs,
+        "total_jobs": jobs_data["total"],
+        "completed_jobs": jobs_data["completed"],
+        "in_progress_jobs": jobs_data["in_progress"],
+        "pending_jobs": jobs_data["pending"],
         "total_checkins": total_checkins,
         "completed_checkins": completed_checkins,
         "avg_duration_minutes": round(avg_duration, 2),
@@ -847,20 +837,20 @@ async def get_metrics(current_user: User = Depends(get_current_user)):
 async def export_reports(current_user: User = Depends(get_current_user)):
     """Export consolidated report to Excel"""
     await require_role(current_user, [UserRole.ADMIN, UserRole.MANAGER])
-
-    checkins = await sb_find_many("item_checkins", limit=1000)
-    jobs = await sb_find_many("jobs", limit=1000)
-    installers = await sb_find_many("installers", limit=1000)
-
+    
+    checkins = await db.item_checkins.find({}, {"_id": 0}).to_list(1000)
+    jobs = await db.jobs.find({}, {"_id": 0}).to_list(1000)
+    installers = await db.installers.find({}, {"_id": 0}).to_list(1000)
+    
     logger.info(f"Exporting report: {len(checkins)} checkins, {len(jobs)} jobs, {len(installers)} installers")
-
+    
     jobs_map = {job['id']: job for job in jobs}
     installers_map = {installer['id']: installer for installer in installers}
-
+    
     wb = Workbook()
     ws = wb.active
     ws.title = "Relatório de Trabalhos"
-
+    
     header_fill = PatternFill(start_color="FF1F5A", end_color="FF1F5A", fill_type="solid")
     header_font = Font(bold=True, color="FFFFFF", size=12)
     header_alignment = Alignment(horizontal="center", vertical="center")
@@ -870,7 +860,7 @@ async def export_reports(current_user: User = Depends(get_current_user)):
         top=Side(style='thin'),
         bottom=Side(style='thin')
     )
-
+    
     headers = [
         "Código Job", "Nome do Job", "Cliente", "Item/Produto", "Família",
         "Área Total (m²)", "M² Instalado", "Instalador",
@@ -878,14 +868,14 @@ async def export_reports(current_user: User = Depends(get_current_user)):
         "GPS Check-out (Lat)", "GPS Check-out (Long)",
         "Data Check-in", "Data Check-out", "Tempo (min)", "Status", "Filial"
     ]
-
+    
     for col_num, header in enumerate(headers, 1):
         cell = ws.cell(row=1, column=col_num, value=header)
         cell.fill = header_fill
         cell.font = header_font
         cell.alignment = header_alignment
         cell.border = border
-
+    
     def get_product_family(product_name):
         if not product_name:
             return 'Outros'
@@ -903,24 +893,24 @@ async def export_reports(current_user: User = Depends(get_current_user)):
         if 'display' in name or 'totem' in name:
             return 'Displays/Totens'
         return 'Outros'
-
+    
     row_num = 2
     for checkin in checkins:
         job = jobs_map.get(checkin.get('job_id'))
         installer = installers_map.get(checkin.get('installer_id'))
-
+        
         if not job:
             continue
-
+        
         product_name = checkin.get('product_name') or checkin.get('item_name') or ''
         if not product_name and job.get('holdprint_data', {}).get('products'):
             item_index = checkin.get('item_index', 0)
             products = job['holdprint_data']['products']
             if item_index < len(products):
                 product_name = products[item_index].get('name', '')
-
+        
         job_code = job.get('holdprint_data', {}).get('code') or job.get('code') or job.get('id', '')[:8]
-
+        
         ws.cell(row=row_num, column=1, value=f"#{job_code}").border = border
         ws.cell(row=row_num, column=2, value=job.get('title', '')).border = border
         ws.cell(row=row_num, column=3, value=job.get('client_name') or job.get('holdprint_data', {}).get('customerName', '')).border = border
@@ -933,7 +923,7 @@ async def export_reports(current_user: User = Depends(get_current_user)):
         ws.cell(row=row_num, column=10, value=checkin.get('gps_long', '')).border = border
         ws.cell(row=row_num, column=11, value=checkin.get('checkout_gps_lat', '')).border = border
         ws.cell(row=row_num, column=12, value=checkin.get('checkout_gps_long', '')).border = border
-
+        
         checkin_at = checkin.get('checkin_at')
         if isinstance(checkin_at, str):
             try:
@@ -941,7 +931,7 @@ async def export_reports(current_user: User = Depends(get_current_user)):
             except:
                 checkin_at = None
         ws.cell(row=row_num, column=13, value=checkin_at.strftime('%d/%m/%Y %H:%M') if checkin_at else '').border = border
-
+        
         checkout_at = checkin.get('checkout_at')
         if isinstance(checkout_at, str):
             try:
@@ -949,15 +939,15 @@ async def export_reports(current_user: User = Depends(get_current_user)):
             except:
                 checkout_at = None
         ws.cell(row=row_num, column=14, value=checkout_at.strftime('%d/%m/%Y %H:%M') if checkout_at else '').border = border
-
+        
         ws.cell(row=row_num, column=15, value=checkin.get('duration_minutes', 0)).border = border
         ws.cell(row=row_num, column=16, value=checkin.get('status', '')).border = border
         ws.cell(row=row_num, column=17, value=job.get('branch', '')).border = border
-
+        
         row_num += 1
-
+    
     logger.info(f"Excel report generated with {row_num - 2} rows")
-
+    
     column_widths = {
         'A': 12, 'B': 35, 'C': 25, 'D': 35, 'E': 18,
         'F': 15, 'G': 15, 'H': 20, 'I': 15, 'J': 15,
@@ -966,13 +956,13 @@ async def export_reports(current_user: User = Depends(get_current_user)):
     }
     for col, width in column_widths.items():
         ws.column_dimensions[col].width = width
-
+    
     excel_file = BytesIO()
     wb.save(excel_file)
     excel_file.seek(0)
-
+    
     filename = f"relatorio_trabalhos_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-
+    
     return StreamingResponse(
         excel_file,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
